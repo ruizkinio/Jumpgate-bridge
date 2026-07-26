@@ -31,6 +31,7 @@ const {
   runProductionStoragePreflight,
 } = require("../lib/storage/factory");
 const {
+  assertRedisNoEvictionPolicy,
   assertRedisSupportedVersion,
   RedisPairingRepository,
   SCRIPT_DEFINITIONS,
@@ -342,6 +343,133 @@ test("Redis server version readiness accepts only well-formed supported majors",
       }),
       (error) => error.code === "redis_version_unsupported"
     );
+  }
+});
+
+test("Redis no-eviction readiness uses INFO memory only for an empty managed CONFIG reply", async () => {
+  for (const configReply of [
+    ["maxmemory-policy", "noeviction"],
+    { "maxmemory-policy": "noeviction" },
+    { maxmemoryPolicy: "noeviction" },
+  ]) {
+    const commands = [];
+    assert.deepEqual(
+      await assertRedisNoEvictionPolicy({
+        async sendCommand(command) {
+          commands.push(command);
+          return configReply;
+        },
+      }),
+      { maxmemoryPolicy: "noeviction" }
+    );
+    assert.deepEqual(commands, [["CONFIG", "GET", "maxmemory-policy"]]);
+  }
+
+  for (const configReply of [[], {}]) {
+    const commands = [];
+    assert.deepEqual(
+      await assertRedisNoEvictionPolicy({
+        async sendCommand(command) {
+          commands.push(command);
+          if (command[0] === "CONFIG") return configReply;
+          assert.deepEqual(command, ["INFO", "memory"]);
+          return "# Memory\r\nmaxmemory_policy:noeviction\r\n";
+        },
+      }),
+      { maxmemoryPolicy: "noeviction" }
+    );
+    assert.deepEqual(commands, [
+      ["CONFIG", "GET", "maxmemory-policy"],
+      ["INFO", "memory"],
+    ]);
+  }
+
+  const nullPrototypeReply = Object.create(null);
+  const commands = [];
+  assert.deepEqual(
+    await assertRedisNoEvictionPolicy({
+      async sendCommand(command) {
+        commands.push(command);
+        return command[0] === "CONFIG"
+          ? nullPrototypeReply
+          : "# Memory\nmaxmemory_policy:noeviction\n";
+      },
+    }),
+    { maxmemoryPolicy: "noeviction" }
+  );
+  assert.deepEqual(commands, [
+    ["CONFIG", "GET", "maxmemory-policy"],
+    ["INFO", "memory"],
+  ]);
+});
+
+test("Redis no-eviction readiness rejects evicting, malformed, and ambiguous policy replies", async () => {
+  for (const configReply of [
+    ["maxmemory-policy", "allkeys-lru"],
+    { "maxmemory-policy": "volatile-lru" },
+  ]) {
+    const commands = [];
+    await assert.rejects(
+      assertRedisNoEvictionPolicy({
+        async sendCommand(command) {
+          commands.push(command);
+          return configReply;
+        },
+      }),
+      (error) => error.code === "redis_eviction_policy"
+    );
+    assert.deepEqual(commands, [["CONFIG", "GET", "maxmemory-policy"]]);
+  }
+
+  for (const infoReply of [
+    "# Memory\r\nmaxmemory_policy:allkeys-lru\r\n",
+    "# Memory\r\n",
+    "maxmemory_policy:noeviction\r\nmaxmemory_policy:noeviction\r\n",
+    null,
+  ]) {
+    await assert.rejects(
+      assertRedisNoEvictionPolicy({
+        async sendCommand(command) {
+          return command[0] === "CONFIG" ? [] : infoReply;
+        },
+      }),
+      infoReply && infoReply.includes("allkeys-lru")
+        ? (error) => error.code === "redis_eviction_policy"
+        : /Redis maxmemory-policy readiness reply is invalid/
+    );
+  }
+
+  for (const configReply of [
+    null,
+    ["maxmemory-policy"],
+    ["maxmemory-policy", null],
+    ["maxmemory-policy", {}],
+    ["other-policy", "noeviction"],
+    Object.assign([], { unexpected: "noeviction" }),
+    Buffer.alloc(0),
+    new Map(),
+    new Date(0),
+    { "maxmemory-policy": null },
+    { "maxmemory-policy": {} },
+    { unexpected: "noeviction" },
+    { "maxmemory-policy": "noeviction", maxmemoryPolicy: "noeviction" },
+    { [Symbol("policy")]: "noeviction" },
+    Object.defineProperty({}, "maxmemory-policy", {
+      enumerable: false,
+      value: "noeviction",
+    }),
+  ]) {
+    const commands = [];
+    await assert.rejects(
+      assertRedisNoEvictionPolicy({
+        async sendCommand(command) {
+          commands.push(command);
+          return configReply;
+        },
+      }),
+      /Redis maxmemory-policy readiness reply is invalid/
+    );
+    assert.deepEqual(commands, [["CONFIG", "GET", "maxmemory-policy"]]);
   }
 });
 
