@@ -970,12 +970,56 @@ test("publication gate binds the canonical repository and private advisory chann
         "env:\n  SPOOFED_CONTEXT: |\n    name: Quality / Node 24\n  NODE_VERSION:"
       ),
   };
+  const spoofedWorkflowViolations = validatePublicationGate(spoofedWorkflowContext);
   assert.equal(
-    validatePublicationGate(spoofedWorkflowContext).some((value) =>
+    spoofedWorkflowViolations.some((value) =>
+      value.includes("release metadata parser failed closed")
+    ),
+    false
+  );
+  assert.equal(
+    spoofedWorkflowViolations.some((value) =>
       value.includes("emitted check contexts must exactly match")
     ),
     true
   );
+
+  for (const [jobName, expectedViolation] of [
+    ["Quality / Node 24", "emitted check contexts must exactly match"],
+    ["Bridge / Kodi fingerprint parity", "emitted check contexts must exactly match"],
+    [
+      "Immutable production image / PostgreSQL + Redis + private S3",
+      "emitted check contexts must exactly match",
+    ],
+    [
+      "Redis ${{ matrix.redis_major }} / 48 live contracts",
+      "emitted check contexts must exactly match",
+    ],
+    ["Redis 7 / 48 live contracts", "emitted check contexts must exactly match"],
+    [
+      "PostgreSQL ${{ matrix.postgres_major }} / 22 live storage contracts",
+      "emitted check contexts must exactly match",
+    ],
+    ["PostgreSQL 16 / 22 live storage contracts", "emitted check contexts must exactly match"],
+    [DEPLOY_CHECK_CONTEXT, "deployment check context must appear exactly once"],
+  ]) {
+    const duplicateWorkflowContext = {
+      ...documents,
+      ".github/workflows/fly-deploy.yml": documents[
+        ".github/workflows/fly-deploy.yml"
+      ].replace(
+        `\n  deploy:\n    name: ${DEPLOY_CHECK_CONTEXT}\n`,
+        `\n  duplicate-context:\n    name: ${jobName}\n    runs-on: ubuntu-latest\n    steps:\n      - run: \"true\"\n\n  deploy:\n    name: ${DEPLOY_CHECK_CONTEXT}\n`
+      ),
+    };
+    assert.equal(
+      validatePublicationGate(duplicateWorkflowContext).some((value) =>
+        value.includes(expectedViolation)
+      ),
+      true,
+      jobName
+    );
+  }
 
   const missingRequiredContext = {
     ...documents,

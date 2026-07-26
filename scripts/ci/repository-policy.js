@@ -1131,6 +1131,11 @@ function validatePublicationGate(documents) {
 
     const emittedContexts = [];
     const jobs = metadata ? metadata.jobs : {};
+    const jobNames = Object.values(jobs)
+      .map((job) => (job && typeof job === "object" ? job.name : null))
+      .filter((name) => typeof name === "string");
+    const jobNameOccurrences = (name) =>
+      jobNames.filter((candidate) => candidate === name).length;
     for (const [jobId, context] of [
       ["quality", "Quality / Node 24"],
       ["fingerprint-parity", "Bridge / Kodi fingerprint parity"],
@@ -1139,7 +1144,13 @@ function validatePublicationGate(documents) {
         "Immutable production image / PostgreSQL + Redis + private S3",
       ],
     ]) {
-      if (jobs[jobId] && jobs[jobId].name === context) emittedContexts.push(context);
+      if (
+        jobs[jobId] &&
+        jobs[jobId].name === context &&
+        jobNameOccurrences(context) === 1
+      ) {
+        emittedContexts.push(context);
+      }
     }
 
     const redisTemplate = "Redis ${{ matrix.redis_major }} / 48 live contracts";
@@ -1153,9 +1164,13 @@ function validatePublicationGate(documents) {
       : [];
     if (
       jobs["redis-live"]?.name === redisTemplate &&
+      jobNameOccurrences(redisTemplate) === 1 &&
       JSON.stringify(redisMajors) === JSON.stringify(["7", "8"])
     ) {
-      emittedContexts.push(...redisMajors.map((major) => `Redis ${major} / 48 live contracts`));
+      const contexts = redisMajors.map((major) => `Redis ${major} / 48 live contracts`);
+      if (contexts.every((context) => jobNameOccurrences(context) === 0)) {
+        emittedContexts.push(...contexts);
+      }
     }
 
     const postgresTemplate =
@@ -1170,11 +1185,15 @@ function validatePublicationGate(documents) {
       : [];
     if (
       jobs["postgres-live"]?.name === postgresTemplate &&
+      jobNameOccurrences(postgresTemplate) === 1 &&
       JSON.stringify(postgresMajors) === JSON.stringify(["16", "17"])
     ) {
-      emittedContexts.push(
-        ...postgresMajors.map((major) => `PostgreSQL ${major} / 22 live storage contracts`)
+      const contexts = postgresMajors.map(
+        (major) => `PostgreSQL ${major} / 22 live storage contracts`
       );
+      if (contexts.every((context) => jobNameOccurrences(context) === 0)) {
+        emittedContexts.push(...contexts);
+      }
     }
 
     if (
@@ -1185,7 +1204,11 @@ function validatePublicationGate(documents) {
         ".github/workflows/fly-deploy.yml: emitted check contexts must exactly match release gates"
       );
     }
-    if (!jobs.deploy || jobs.deploy.name !== DEPLOY_CHECK_CONTEXT) {
+    if (
+      !jobs.deploy ||
+      jobs.deploy.name !== DEPLOY_CHECK_CONTEXT ||
+      jobNameOccurrences(DEPLOY_CHECK_CONTEXT) !== 1
+    ) {
       violations.push(
         ".github/workflows/fly-deploy.yml: deployment check context must appear exactly once"
       );
