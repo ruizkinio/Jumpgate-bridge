@@ -91,6 +91,7 @@ async function request(pathname, expectedStatus, expectedContentType, maximumByt
   try {
     const response = await fetch(new URL(pathname, baseUrl), {
       cache: "no-store",
+      headers: { "accept-encoding": "identity" },
       redirect: "error",
       signal: AbortSignal.timeout(Math.min(5000, remainingMs)),
     });

@@ -86,6 +86,7 @@ function sendHealth(res, value, status = 200, overrides = {}) {
 
 function completeHandler(options = {}) {
   return (req, res) => {
+    options.onRequest?.(req);
     if (req.url === "/health/live") {
       options.onLive?.();
       return sendHealth(
@@ -129,8 +130,12 @@ function completeHandler(options = {}) {
 test("semantic smoke retries the complete contract and requires exact provenance", async () => {
   let liveRequests = 0;
   let readyRequests = 0;
+  const acceptEncodings = [];
   const fixture = await listen(
     completeHandler({
+      onRequest: (request) => {
+        acceptEncodings.push(request.headers["accept-encoding"]);
+      },
       onLive: () => {
         liveRequests += 1;
       },
@@ -150,6 +155,8 @@ test("semantic smoke retries the complete contract and requires exact provenance
     assert.equal(result.signal, null);
     assert.match(result.stdout, /HTTP smoke passed/);
     assert.equal(liveRequests >= 2, true);
+    assert.equal(acceptEncodings.length > 0, true);
+    assert.equal(acceptEncodings.every((value) => value === "identity"), true);
   } finally {
     await close(fixture.server);
   }
