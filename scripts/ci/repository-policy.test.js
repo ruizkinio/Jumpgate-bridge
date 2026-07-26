@@ -23,6 +23,7 @@ const {
   REDIS_V5_FIXTURE_SHA256,
   REDIS_V5_POLICY_FILES,
   REDIS_V5_SCRIPT_LOADER_PATH,
+  WORKFLOW_RELEASE_METADATA_PARSER_PATH,
   findActionReferences,
   inspectPackageArtifact,
   isAllowedPackagePath,
@@ -921,6 +922,122 @@ test("publication gate binds the canonical repository and private advisory chann
     true
   );
 
+  for (const exactJobLine of [
+    "    name: Quality / Node 24",
+    "    name: Bridge / Kodi fingerprint parity",
+    "    name: Immutable production image / PostgreSQL + Redis + private S3",
+    "    name: Redis ${{ matrix.redis_major }} / 48 live contracts",
+    "    name: PostgreSQL ${{ matrix.postgres_major }} / 22 live storage contracts",
+  ]) {
+    const suffixedWorkflowContext = {
+      ...documents,
+      ".github/workflows/fly-deploy.yml": documents[
+        ".github/workflows/fly-deploy.yml"
+      ].replace(exactJobLine, exactJobLine + " renamed"),
+    };
+    assert.equal(
+      validatePublicationGate(suffixedWorkflowContext).some((value) =>
+        value.includes("emitted check contexts must exactly match")
+      ),
+      true,
+      exactJobLine
+    );
+  }
+
+  const suffixedDeployContext = {
+    ...documents,
+    ".github/workflows/fly-deploy.yml": documents[
+      ".github/workflows/fly-deploy.yml"
+    ].replace(
+      `    name: ${DEPLOY_CHECK_CONTEXT}`,
+      `    name: ${DEPLOY_CHECK_CONTEXT} renamed`
+    ),
+  };
+  assert.equal(
+    validatePublicationGate(suffixedDeployContext).some((value) =>
+      value.includes("deployment check context must appear exactly once")
+    ),
+    true
+  );
+
+  const spoofedWorkflowContext = {
+    ...documents,
+    ".github/workflows/fly-deploy.yml": documents[
+      ".github/workflows/fly-deploy.yml"
+    ]
+      .replace("    name: Quality / Node 24", "    name: Quality / Node changed")
+      .replace(
+        "env:\n  NODE_VERSION:",
+        "env:\n  SPOOFED_CONTEXT: |\n    name: Quality / Node 24\n  NODE_VERSION:"
+      ),
+  };
+  const spoofedWorkflowViolations = validatePublicationGate(spoofedWorkflowContext);
+  assert.equal(
+    spoofedWorkflowViolations.some((value) =>
+      value.includes("release metadata parser failed closed")
+    ),
+    false
+  );
+  assert.equal(
+    spoofedWorkflowViolations.some((value) =>
+      value.includes("emitted check contexts must exactly match")
+    ),
+    true
+  );
+
+  for (const [jobName, expectedViolation] of [
+    ["Quality / Node 24", "emitted check contexts must exactly match"],
+    ["Bridge / Kodi fingerprint parity", "emitted check contexts must exactly match"],
+    [
+      "Immutable production image / PostgreSQL + Redis + private S3",
+      "emitted check contexts must exactly match",
+    ],
+    [
+      "Redis ${{ matrix.redis_major }} / 48 live contracts",
+      "emitted check contexts must exactly match",
+    ],
+    ["Redis 7 / 48 live contracts", "emitted check contexts must exactly match"],
+    [
+      "PostgreSQL ${{ matrix.postgres_major }} / 22 live storage contracts",
+      "emitted check contexts must exactly match",
+    ],
+    ["PostgreSQL 16 / 22 live storage contracts", "emitted check contexts must exactly match"],
+    [DEPLOY_CHECK_CONTEXT, "deployment check context must appear exactly once"],
+  ]) {
+    const duplicateWorkflowContext = {
+      ...documents,
+      ".github/workflows/fly-deploy.yml": documents[
+        ".github/workflows/fly-deploy.yml"
+      ].replace(
+        `\n  deploy:\n    name: ${DEPLOY_CHECK_CONTEXT}\n`,
+        `\n  duplicate-context:\n    name: ${jobName}\n    runs-on: ubuntu-latest\n    steps:\n      - run: \"true\"\n\n  deploy:\n    name: ${DEPLOY_CHECK_CONTEXT}\n`
+      ),
+    };
+    assert.equal(
+      validatePublicationGate(duplicateWorkflowContext).some((value) =>
+        value.includes(expectedViolation)
+      ),
+      true,
+      jobName
+    );
+  }
+
+  const additionalReleaseJob = {
+    ...documents,
+    ".github/workflows/fly-deploy.yml": documents[
+      ".github/workflows/fly-deploy.yml"
+    ].replace(
+      `\n  deploy:\n    name: ${DEPLOY_CHECK_CONTEXT}\n`,
+      `\n  additional-check:\n    name: Additional policy check\n    runs-on: ubuntu-latest\n    steps:\n      - run: \"true\"\n\n  deploy:\n    name: ${DEPLOY_CHECK_CONTEXT}\n`
+    ),
+  };
+  assert.equal(
+    validatePublicationGate(additionalReleaseJob).some((value) =>
+      value.includes("release workflow job set must be exact")
+    ),
+    true
+  );
+
   const missingRequiredContext = {
     ...documents,
     "scripts/ci/RELEASE_GATES.md": documents["scripts/ci/RELEASE_GATES.md"].replace(
@@ -985,6 +1102,26 @@ for (const objectFormat of ["sha1", "sha256"]) {
     }
     assert.deepEqual(validatePackageLicenseEntries(packResult.files), []);
 
+    assert.deepEqual(runPolicy(root, { env }).violations, []);
+    const releaseParserBytes = readIndexedFileBytes(
+      root,
+      parsed,
+      WORKFLOW_RELEASE_METADATA_PARSER_PATH,
+      { env }
+    );
+    writeIndexBlob(
+      root,
+      env,
+      WORKFLOW_RELEASE_METADATA_PARSER_PATH,
+      Buffer.from("exit 1\n", "utf8")
+    );
+    assert.equal(
+      runPolicy(root, { env }).violations.some((value) =>
+        value.includes("release metadata parser failed closed")
+      ),
+      true
+    );
+    writeIndexBlob(root, env, WORKFLOW_RELEASE_METADATA_PARSER_PATH, releaseParserBytes);
     assert.deepEqual(runPolicy(root, { env }).violations, []);
     assert.deepEqual(
       runCommand(root, "git", ["ls-files", "--stage", "-z"]),
