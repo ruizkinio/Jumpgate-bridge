@@ -15,8 +15,10 @@ const RELEASE_COMMAND = "node scripts/production-release-protocols.js apply-env"
 const PROTOCOL_STATUS_COMMAND = "node scripts/playback-claim-writer-protocol.js status";
 const PROTOCOL_STATUS_MARKER = "JUMPGATE_WRITER_PROTOCOL_STATUS_JSON=";
 const CANDIDATE_PROTOCOL_STATUS_COMMAND =
+  "/bin/sh -lc '" +
   'status="$(' + PROTOCOL_STATUS_COMMAND + ')" || exit $?; ' +
-  'printf \'%s\\n\' "$status" | sed \'s/^/' + PROTOCOL_STATUS_MARKER + '/\'';
+  'printf "%s\\n" "$status" | sed "s/^/' + PROTOCOL_STATUS_MARKER + '/"' +
+  "'";
 const ROLLOUT_PHASES = new Set(["transition", "v6"]);
 const REQUIRED_ENV = Object.freeze({
   JUMPGATE_DURABLE_DRIVER: "postgres",

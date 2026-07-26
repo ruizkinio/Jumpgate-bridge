@@ -375,8 +375,19 @@ test("candidate protocol probe is ephemeral, service-free, bounded, and secret-s
     invocation.args[invocation.args.indexOf("--command") + 1],
     CANDIDATE_PROTOCOL_STATUS_COMMAND
   );
+  assert.equal(
+    CANDIDATE_PROTOCOL_STATUS_COMMAND,
+    "/bin/sh -lc '" +
+      'status="$(node scripts/playback-claim-writer-protocol.js status)" || exit $?; ' +
+      'printf "%s\\n" "$status" | ' +
+      'sed "s/^/JUMPGATE_WRITER_PROTOCOL_STATUS_JSON=/"' +
+      "'"
+  );
+  assert.match(CANDIDATE_PROTOCOL_STATUS_COMMAND, /^\/bin\/sh -lc '/);
+  assert.match(CANDIDATE_PROTOCOL_STATUS_COMMAND, /'$/);
   assert.match(CANDIDATE_PROTOCOL_STATUS_COMMAND, /playback-claim-writer-protocol\.js status/);
   assert.match(CANDIDATE_PROTOCOL_STATUS_COMMAND, /JUMPGATE_WRITER_PROTOCOL_STATUS_JSON=/);
+  assert.doesNotMatch(CANDIDATE_PROTOCOL_STATUS_COMMAND, /[\r\n]/);
   assert.equal(invocation.options.env.FLY_API_TOKEN, "fly-token");
   assert.equal(invocation.options.env.NO_COLOR, "1");
   assert.equal(Object.hasOwn(invocation.options.env, "REDIS_URL"), false);
