@@ -12,6 +12,8 @@
   const PAIRING_RECOVERY_STORAGE_KEY = "jumpgate.pairing.activation.v1";
   const PAIRING_RECOVERY_TTL_MS = 10 * 60 * 1000;
   const PROFILE_DELETE_CONFIRMATION = "DELETE PROFILE";
+  const MANAGEMENT_AUTH_REQUIRED_MESSAGE =
+    "Management authorization expired. Generate a new pairing code in Jumpgate Manager, enter it here, and pair again before changing providers.";
 
   function isRecord(value) {
     return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -277,16 +279,94 @@
     return "Jumpgate could not complete this profile action.";
   }
 
+  function isManagementAuthRequiredResponse(response, body) {
+    return Boolean(
+      response &&
+        (response.status === 401 || (isRecord(body) && body.error === "management_auth_required"))
+    );
+  }
+
+  function managementAuthRequiredError(status) {
+    const error = codedError("management_auth_required", MANAGEMENT_AUTH_REQUIRED_MESSAGE);
+    error.status = status;
+    return error;
+  }
+
+  function staleManagementAuthorityError(cause) {
+    return codedError(
+      "stale_management_authority",
+      "Management authority changed while the request was running",
+      cause
+    );
+  }
+
+  function validManagementAuthority(authority) {
+    return Boolean(
+      isRecord(authority) &&
+        Number.isSafeInteger(authority.epoch) &&
+        authority.epoch >= 0 &&
+        typeof authority.csrf === "string" &&
+        authority.csrf
+    );
+  }
+
+  function createManagementProfileRequester(options) {
+    const input = options || {};
+    if (typeof input.fetch !== "function") throw new TypeError("fetch is required");
+    if (typeof input.getAuthority !== "function") {
+      throw new TypeError("management authority getter is required");
+    }
+    if (typeof input.isAuthorityCurrent !== "function") {
+      throw new TypeError("management authority validator is required");
+    }
+
+    return async function request(url, requestOptions) {
+      const authority = input.getAuthority();
+      if (!validManagementAuthority(authority)) throw managementAuthRequiredError(401);
+      const request = requestOptions || {};
+      const headers = new Headers(request.headers || {});
+      headers.set("X-Jumpgate-CSRF", authority.csrf);
+      const response = await input.fetch(url, {
+        ...request,
+        headers,
+        credentials: "same-origin",
+        cache: "no-store",
+      });
+      const body = await response.json().catch(() => ({}));
+      const authorityIsCurrent = input.isAuthorityCurrent(authority);
+      if (isManagementAuthRequiredResponse(response, body)) {
+        if (!authorityIsCurrent) throw staleManagementAuthorityError();
+        const error = managementAuthRequiredError(response.status);
+        if (typeof input.onAuthRequired === "function") input.onAuthRequired(error, authority);
+        throw error;
+      }
+      if (!authorityIsCurrent) throw staleManagementAuthorityError();
+      if (!response.ok || !body.ok) {
+        const error = new Error(body.error || "Request failed");
+        error.code = body.error || "request_failed";
+        error.status = response.status;
+        throw error;
+      }
+      return body;
+    };
+  }
+
   function createProfileManagementApi(options) {
     const input = options || {};
     if (typeof input.fetch !== "function") throw new TypeError("fetch is required");
-    if (typeof input.csrf !== "string" || !input.csrf) throw new TypeError("management CSRF is required");
+    if (!validManagementAuthority(input.authority)) throw new TypeError("management authority is required");
+    if (input.csrf !== undefined && input.csrf !== input.authority.csrf) {
+      throw new TypeError("management CSRF does not match authority");
+    }
+    if (typeof input.isAuthorityCurrent !== "function") {
+      throw new TypeError("management authority validator is required");
+    }
     const origin = new URL(input.origin).origin;
 
     async function request(path, requestOptions, expectedStatus) {
       const request = requestOptions || {};
       const headers = new Headers(request.headers || {});
-      headers.set("X-Jumpgate-CSRF", input.csrf);
+      headers.set("X-Jumpgate-CSRF", input.authority.csrf);
       let response;
       try {
         response = await input.fetch(path, {
@@ -295,11 +375,24 @@
           credentials: "same-origin",
           cache: "no-store",
         });
-      } catch (_error) {
+      } catch (error) {
+        if (!input.isAuthorityCurrent(input.authority)) {
+          throw staleManagementAuthorityError(error);
+        }
         throw new Error("Jumpgate could not complete this profile action.");
       }
       let body = null;
       if (response.status !== 204) body = await response.json().catch(() => null);
+      const authorityIsCurrent = input.isAuthorityCurrent(input.authority);
+      if (isManagementAuthRequiredResponse(response, body)) {
+        if (!authorityIsCurrent) throw staleManagementAuthorityError();
+        const error = managementAuthRequiredError(response.status);
+        if (typeof input.onAuthRequired === "function") {
+          input.onAuthRequired(error, input.authority);
+        }
+        throw error;
+      }
+      if (!authorityIsCurrent) throw staleManagementAuthorityError();
       if (
         !response.ok ||
         (expectedStatus !== undefined && response.status !== expectedStatus) ||
@@ -311,8 +404,10 @@
     }
 
     return Object.freeze({
-      async getDevices() {
-        return parseManagedDevicesResponse(await request("/api/profile/devices", { method: "GET" }));
+      async getDevices(options) {
+        return parseManagedDevicesResponse(
+          await request("/api/profile/devices", { ...(options || {}), method: "GET" })
+        );
       },
       revokeDevice(deviceId) {
         if (typeof deviceId !== "string" || !/^[A-Za-z0-9_-]{1,200}$/.test(deviceId)) {
@@ -389,7 +484,12 @@
   }
 
   function isCancellationError(error) {
-    return Boolean(error && (error.code === "aborted" || error.name === "AbortError"));
+    return Boolean(
+      error &&
+        (error.code === "aborted" ||
+          error.code === "stale_management_authority" ||
+          error.name === "AbortError")
+    );
   }
 
   function localApprovalDeadlineMessage(expiresAt, now) {
@@ -608,6 +708,7 @@
     let privateInstallUrl = "";
     let privateManifestUrl = "";
     let managementCsrf = "";
+    let managementAuthorityEpoch = 0;
     let pairExpiryTimer = null;
     let pairExpiresAtMs = 0;
     let pairStatusBaseMessage = "";
@@ -615,10 +716,39 @@
     let pairExpiryAnnounced = false;
     let profileManagementApi = null;
     let profileManagementBusy = false;
+    let profileManagementBusyEpoch = null;
+    let managementRefreshController = null;
     let profileTraktLinked = null;
     const providerOperationMutex = createOperationMutex();
     const privateCapabilityFields = new Set(["bridge", "manifest", "install", "installManifest"]);
     let activeProviderOperation = null;
+
+    function captureManagementAuthority() {
+      return managementCsrf
+        ? Object.freeze({ epoch: managementAuthorityEpoch, csrf: managementCsrf })
+        : null;
+    }
+
+    function isManagementAuthorityCurrent(authority) {
+      return Boolean(
+        validManagementAuthority(authority) &&
+          authority.epoch === managementAuthorityEpoch &&
+          authority.csrf === managementCsrf &&
+          pairedForConfig
+      );
+    }
+
+    function advanceManagementAuthority() {
+      managementAuthorityEpoch += 1;
+      clearProviderAuthorityUi(activeProviderOperation);
+      setStatus("", false);
+    }
+
+    function abortManagementRefresh() {
+      const controller = managementRefreshController;
+      managementRefreshController = null;
+      if (controller && !controller.signal.aborted) controller.abort();
+    }
 
     function setHidden(element, hidden) {
       if (element) element.classList.toggle("hidden", Boolean(hidden));
@@ -655,8 +785,20 @@
       byId("profileManagement").setAttribute("aria-busy", profileManagementBusy ? "true" : "false");
     }
 
-    function setManagementPending(pending) {
-      profileManagementBusy = Boolean(pending);
+    function setManagementPending(pending, authority) {
+      if (pending) {
+        profileManagementBusy = true;
+        profileManagementBusyEpoch = authority ? authority.epoch : managementAuthorityEpoch;
+      } else if (
+        authority &&
+        profileManagementBusyEpoch !== null &&
+        profileManagementBusyEpoch !== authority.epoch
+      ) {
+        return;
+      } else {
+        profileManagementBusy = false;
+        profileManagementBusyEpoch = null;
+      }
       refreshManagementActionAvailability();
     }
 
@@ -730,9 +872,12 @@
       refreshManagementActionAvailability();
     }
 
-    async function loadProfileManagementState() {
-      if (!profileManagementApi) throw new Error("Pair Jumpgate again to authorize profile changes.");
-      const state = await profileManagementApi.getDevices();
+    async function loadProfileManagementState(api, authority, options) {
+      if (!api || !isManagementAuthorityCurrent(authority)) {
+        throw staleManagementAuthorityError();
+      }
+      const state = await api.getDevices(options);
+      if (!isManagementAuthorityCurrent(authority)) throw staleManagementAuthorityError();
       if (state.traktLinked !== undefined) profileTraktLinked = state.traktLinked;
       renderManagedDevices(state.devices);
       renderTraktManagementState();
@@ -741,32 +886,56 @@
 
     async function refreshProfileManagement() {
       if (!profileManagementApi || profileManagementBusy) return;
-      setManagementPending(true);
+      const api = profileManagementApi;
+      const authority = captureManagementAuthority();
+      if (!isManagementAuthorityCurrent(authority)) return;
+      abortManagementRefresh();
+      const controller = new AbortController();
+      managementRefreshController = controller;
+      setManagementPending(true, authority);
       setManagementStatus("Refreshing paired-profile state...", false);
       try {
-        await loadProfileManagementState();
-        setManagementStatus("Paired-profile state refreshed.", false);
+        await loadProfileManagementState(api, authority, { signal: controller.signal });
+        if (managementRefreshController === controller && isManagementAuthorityCurrent(authority)) {
+          setManagementStatus("Paired-profile state refreshed.", false);
+        }
       } catch (error) {
-        setManagementStatus(error.message || "Jumpgate could not refresh this profile.", true);
+        if (
+          managementRefreshController === controller &&
+          isManagementAuthorityCurrent(authority) &&
+          !isCancellationError(error)
+        ) {
+          setManagementStatus(error.message || "Jumpgate could not refresh this profile.", true);
+        }
       } finally {
-        setManagementPending(false);
+        if (managementRefreshController === controller) {
+          managementRefreshController = null;
+          setManagementPending(false, authority);
+        }
       }
     }
 
     async function runManagementAction(pendingMessage, successMessage, action) {
       if (!profileManagementApi || profileManagementBusy) return false;
-      setManagementPending(true);
+      const api = profileManagementApi;
+      const authority = captureManagementAuthority();
+      if (!isManagementAuthorityCurrent(authority)) return false;
+      setManagementPending(true, authority);
       setManagementStatus(pendingMessage, false);
       try {
-        await action();
-        await loadProfileManagementState();
+        await action(api);
+        if (!isManagementAuthorityCurrent(authority)) return false;
+        await loadProfileManagementState(api, authority);
+        if (!isManagementAuthorityCurrent(authority)) return false;
         setManagementStatus(successMessage, false);
         return true;
       } catch (error) {
-        setManagementStatus(error.message || "Jumpgate could not complete this profile action.", true);
+        if (isManagementAuthorityCurrent(authority) && !isCancellationError(error)) {
+          setManagementStatus(error.message || "Jumpgate could not complete this profile action.", true);
+        }
         return false;
       } finally {
-        setManagementPending(false);
+        setManagementPending(false, authority);
       }
     }
 
@@ -779,7 +948,7 @@
       await runManagementAction(
         "Revoking the selected device credential...",
         "The device credential was revoked and the paired-device list was refreshed.",
-        () => profileManagementApi.revokeDevice(device.id)
+        (api) => api.revokeDevice(device.id)
       );
     }
 
@@ -791,7 +960,7 @@
       await runManagementAction(
         "Clearing current Bridge history...",
         "Current Bridge history was cleared. Future playback will create new entries.",
-        () => profileManagementApi.clearHistory()
+        (api) => api.clearHistory()
       );
     }
 
@@ -803,7 +972,7 @@
       const completed = await runManagementAction(
         "Disconnecting Trakt...",
         "Trakt was disconnected. History already stored by Trakt was not deleted.",
-        () => profileManagementApi.disconnectTrakt()
+        (api) => api.disconnectTrakt()
       );
       if (completed) {
         profileTraktLinked = false;
@@ -813,15 +982,22 @@
 
     async function connectManagedTrakt() {
       if (!profileManagementApi || profileManagementBusy) return;
-      setManagementPending(true);
+      const api = profileManagementApi;
+      const authority = captureManagementAuthority();
+      if (!isManagementAuthorityCurrent(authority)) return;
+      setManagementPending(true, authority);
       setManagementStatus("Preparing the same-origin Trakt connection route...", false);
       try {
-        const target = await profileManagementApi.connectTrakt();
+        const target = await api.connectTrakt();
+        if (!isManagementAuthorityCurrent(authority)) return;
         setManagementStatus("Opening the Trakt connection flow...", false);
         browser.location.assign(target);
       } catch (error) {
-        setManagementStatus(error.message || "Jumpgate could not start the Trakt connection.", true);
-        setManagementPending(false);
+        if (isManagementAuthorityCurrent(authority) && !isCancellationError(error)) {
+          setManagementStatus(error.message || "Jumpgate could not start the Trakt connection.", true);
+        }
+      } finally {
+        setManagementPending(false, authority);
       }
     }
 
@@ -832,15 +1008,68 @@
 
     function setFinalOperationStatus(operation, message, isError) {
       operation.finalStatus = { message, isError: Boolean(isError) };
-      renderOperationStatus(operation);
+      if (!operation.suppressFinalStatus) renderOperationStatus(operation);
+    }
+
+    function handleManagementAuthRequired(_error, authority) {
+      if (!isManagementAuthorityCurrent(authority)) return false;
+      const operation = activeProviderOperation;
+      const matchingOperationHandled = Boolean(
+        operation &&
+        operation.owner.isOwner() &&
+        operation.authority.epoch === authority.epoch
+      );
+      if (matchingOperationHandled) {
+        operation.managementAuthRequired = true;
+        cancelProviderOperation(operation, MANAGEMENT_AUTH_REQUIRED_MESSAGE);
+      }
+      abortManagementRefresh();
+      advanceManagementAuthority();
+      privateBridgeBaseUrl = "";
+      privateInstallUrl = "";
+      privateManifestUrl = "";
+      managementCsrf = "";
+      profileManagementApi = null;
+      profileManagementBusy = false;
+      profileManagementBusyEpoch = null;
+      profileTraktLinked = null;
+      pairedForConfig = false;
+      providersReady = false;
+      installPromptOpened = false;
+      pairPrefill = null;
+      if (pairExpiryTimer) clearInterval(pairExpiryTimer);
+      pairExpiryTimer = null;
+      pairExpiresAtMs = 0;
+      pairExpiryAnnounced = false;
+      byId("pairCode").value = "";
+      byId("pairTimer").textContent = "";
+      byId("providerList").replaceChildren();
+      renderManagedDevices([]);
+      clearApprovalMaterial(operation);
+      setHidden(byId("providerPreview"), true);
+      setHidden(byId("cancelStremioBtn"), true);
+      setHidden(byId("profileManagement"), true);
+      renderTraktManagementState();
+      setPairStatus(MANAGEMENT_AUTH_REQUIRED_MESSAGE, true);
+      setManagementStatus(MANAGEMENT_AUTH_REQUIRED_MESSAGE, true);
+      if (matchingOperationHandled) {
+        setFinalOperationStatus(operation, MANAGEMENT_AUTH_REQUIRED_MESSAGE, true);
+      } else {
+        setStatus(MANAGEMENT_AUTH_REQUIRED_MESSAGE, true);
+      }
+      refreshSteps();
+      return true;
     }
 
     function beginProviderOperation(kind) {
+      const authority = captureManagementAuthority();
+      if (!isManagementAuthorityCurrent(authority)) return null;
       const owner = providerOperationMutex.acquire(kind);
       if (!owner) return null;
       const operation = {
         kind,
         owner,
+        authority,
         controller: new AbortController(),
         decision: null,
         finalStatus: null,
@@ -848,6 +1077,21 @@
       };
       activeProviderOperation = operation;
       refreshSteps();
+      return operation;
+    }
+
+    function providerOperationIsCurrent(operation) {
+      return Boolean(
+        operation &&
+          activeProviderOperation === operation &&
+          operation.owner.isOwner() &&
+          !operation.controller.signal.aborted &&
+          isManagementAuthorityCurrent(operation.authority)
+      );
+    }
+
+    function requireCurrentProviderOperation(operation) {
+      if (!providerOperationIsCurrent(operation)) throw staleManagementAuthorityError();
       return operation;
     }
 
@@ -882,12 +1126,17 @@
       setHidden(byId("stremioLink"), true);
     }
 
+    function clearProviderAuthorityUi(operation) {
+      clearApprovalMaterial(operation);
+      byId("providerList").replaceChildren();
+      setHidden(byId("providerPreview"), true);
+      setHidden(byId("cancelStremioBtn"), true);
+    }
+
     function finishProviderOperation(operation) {
       if (!operation || !operation.owner.isOwner()) return false;
       if (operation.decision) operation.decision.cancel("Provider operation ended");
-      clearApprovalMaterial(operation);
-      setHidden(byId("providerPreview"), true);
-      setHidden(byId("cancelStremioBtn"), true);
+      clearProviderAuthorityUi(operation);
       operation.owner.release();
       if (activeProviderOperation === operation) activeProviderOperation = null;
       refreshSteps();
@@ -1114,6 +1363,8 @@
 
     function showResult(value) {
       if (activeProviderOperation) cancelProviderOperation(activeProviderOperation, "Provider operation canceled");
+      abortManagementRefresh();
+      advanceManagementAuthority();
       setHidden(byId("result"), false);
       // Install capabilities are accepted only from a successful pairing response.
       privateBridgeBaseUrl = "";
@@ -1141,6 +1392,7 @@
       managementCsrf = "";
       profileManagementApi = null;
       profileManagementBusy = false;
+      profileManagementBusyEpoch = null;
       profileTraktLinked = value.traktLinked === true ? true : false;
       setHidden(byId("profileManagement"), true);
       renderTraktManagementState();
@@ -1176,12 +1428,15 @@
 
     function clearPrivateConfigurationState() {
       if (activeProviderOperation) cancelProviderOperation(activeProviderOperation, "Profile deleted");
+      abortManagementRefresh();
+      advanceManagementAuthority();
       privateBridgeBaseUrl = "";
       privateInstallUrl = "";
       privateManifestUrl = "";
       managementCsrf = "";
       profileManagementApi = null;
       profileManagementBusy = false;
+      profileManagementBusyEpoch = null;
       profileTraktLinked = null;
       pairedForConfig = false;
       providersReady = false;
@@ -1237,21 +1492,26 @@
       ) {
         return;
       }
-      setManagementPending(true);
+      const api = profileManagementApi;
+      const authority = captureManagementAuthority();
+      if (!isManagementAuthorityCurrent(authority)) return;
+      setManagementPending(true, authority);
       byId("deleteProfileConfirmation").disabled = true;
       byId("confirmDeleteProfileBtn").disabled = true;
       byId("confirmDeleteProfileBtn").textContent = "Deletion requested...";
       setDeleteDialogStatus("Requesting destructive profile deletion...", false);
       try {
-        await profileManagementApi.deleteProfile();
+        await api.deleteProfile();
+        if (!isManagementAuthorityCurrent(authority)) return;
         const dialog = byId("deleteProfileDialog");
         if (dialog.open) dialog.close();
         clearPrivateConfigurationState();
       } catch (error) {
+        if (!isManagementAuthorityCurrent(authority) || isCancellationError(error)) return;
         const message = error.message || "Jumpgate could not complete this profile action.";
         setDeleteDialogStatus(message, true);
         setManagementStatus(message, true);
-        setManagementPending(false);
+        setManagementPending(false, authority);
         byId("deleteProfileConfirmation").disabled = false;
         byId("confirmDeleteProfileBtn").textContent = "Delete profile permanently";
         byId("confirmDeleteProfileBtn").disabled = false;
@@ -1302,6 +1562,12 @@
       ) {
         throw new Error("Pairing did not return the private install links");
       }
+      if (activeProviderOperation) {
+        activeProviderOperation.suppressFinalStatus = true;
+        cancelProviderOperation(activeProviderOperation, "Management authority changed");
+      }
+      abortManagementRefresh();
+      advanceManagementAuthority();
       setHidden(byId("result"), false);
       byId("configBlob").value = config;
       managementCsrf = body.managementCsrf;
@@ -1311,10 +1577,15 @@
       pairedForConfig = true;
       providersReady = false;
       installPromptOpened = false;
+      profileManagementBusy = false;
+      profileManagementBusyEpoch = null;
+      const authority = captureManagementAuthority();
       profileManagementApi = createProfileManagementApi({
         fetch: browser.fetch.bind(browser),
-        csrf: managementCsrf,
+        authority,
+        isAuthorityCurrent: isManagementAuthorityCurrent,
         origin: browser.location.origin,
+        onAuthRequired: handleManagementAuthRequired,
       });
       setHidden(byId("profileManagement"), false);
       renderTraktManagementState();
@@ -1365,19 +1636,12 @@
       }
     }
 
-    async function profileRequest(url, options) {
-      if (!managementCsrf) throw new Error("Pair Jumpgate again to authorize provider changes");
-      const request = options || {};
-      const headers = new Headers(request.headers || {});
-      headers.set("X-Jumpgate-CSRF", managementCsrf);
-      const response = await browser.fetch(url, {
-        ...request,
-        headers,
-        credentials: "same-origin",
-        cache: "no-store",
-      });
-      return readJsonResponse(response);
-    }
+    const profileRequest = createManagementProfileRequester({
+      fetch: browser.fetch.bind(browser),
+      getAuthority: captureManagementAuthority,
+      isAuthorityCurrent: isManagementAuthorityCurrent,
+      onAuthRequired: handleManagementAuthRequired,
+    });
 
     async function generateConfigured() {
       if (!byId("skipTraktAcknowledge").checked) {
@@ -1467,9 +1731,7 @@
     }
 
     function selectedProviderDecision(previews, descriptors, sourceCollection, operation) {
-      if (!operation || !operation.owner.isOwner()) {
-        throw codedError("operation_unavailable", "Provider operation is no longer active");
-      }
+      requireCurrentProviderOperation(operation);
       const signal = operation.controller.signal;
       const list = byId("providerList");
       list.replaceChildren();
@@ -1564,14 +1826,17 @@
 
     async function previewProviders(descriptors, sourceCollection, operation) {
       const previews = await previewDescriptorBatches(descriptors, async (batch) => {
+        requireCurrentProviderOperation(operation);
         const response = await profileRequest("/api/profile/providers/preview", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ descriptors: batch }),
           signal: operation.controller.signal,
         });
+        requireCurrentProviderOperation(operation);
         return response.providers;
       });
+      requireCurrentProviderOperation(operation);
       return selectedProviderDecision(
         previews,
         descriptors,
@@ -1581,16 +1846,21 @@
     }
 
     async function persistSelection(decision, operation) {
+      requireCurrentProviderOperation(operation);
       const signal = operation.controller.signal;
       const transition = await runProviderSetupTransition(
         { providersReady, installPromptOpened },
         {
           sourceCollection: decision.sourceCollection,
           descriptors: decision.descriptors,
-          getCurrentProviders() {
-            return profileRequest("/api/profile/providers", { signal });
+          async getCurrentProviders() {
+            requireCurrentProviderOperation(operation);
+            const current = await profileRequest("/api/profile/providers", { signal });
+            requireCurrentProviderOperation(operation);
+            return current;
           },
           async createBackup(collection) {
+            requireCurrentProviderOperation(operation);
             const created = await profileRequest("/api/profile/backups", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
@@ -1600,19 +1870,24 @@
               }),
               signal,
             });
+            requireCurrentProviderOperation(operation);
             return created.backup;
           },
-          putProviders(descriptors, expectedRevision) {
-            return profileRequest("/api/profile/providers", {
+          async putProviders(descriptors, expectedRevision) {
+            requireCurrentProviderOperation(operation);
+            const imported = await profileRequest("/api/profile/providers", {
               method: "PUT",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ descriptors, expectedRevision }),
               signal,
             });
+            requireCurrentProviderOperation(operation);
+            return imported;
           },
         }
       );
 
+      requireCurrentProviderOperation(operation);
       providersReady = transition.state.providersReady;
       installPromptOpened = transition.state.installPromptOpened;
       refreshSteps();
@@ -1642,6 +1917,7 @@
       try {
         const client = browser.JumpgateStremioAccount.createStremioAccountClient();
         const session = await client.createLinkSession({ signal });
+        requireCurrentProviderOperation(operation);
         byId("stremioCode").textContent = session.code;
         byId("stremioApprovalLink").href = session.link;
         byId("stremioQr").src = session.qrcode;
@@ -1655,16 +1931,19 @@
 
         const collection = await session.readAddonCollection({
           onApproved() {
+            if (!providerOperationIsCurrent(operation)) return;
             clearApprovalMaterial(operation);
             setStatus("Approval received. Reading the active profile's addon collection once in this browser...", false);
           },
         });
+        requireCurrentProviderOperation(operation);
         setStatus("The active profile's addon collection was read once in this browser.", false);
         const candidates = gatewayCandidates(collection.addons);
         if (!candidates.length) throw new Error("No stream or subtitle providers were found");
         const decision = await previewProviders(candidates, collection, operation);
         setStatus("Backing up the source descriptors and importing the confirmed providers into Jumpgate...", false);
         const completed = await persistSelection(decision, operation);
+        requireCurrentProviderOperation(operation);
         setFinalOperationStatus(
           operation,
           "Imported " + completed.count + " provider" + (completed.count === 1 ? "" : "s") +
@@ -1672,7 +1951,9 @@
           false
         );
       } catch (error) {
-        if (isCancellationError(error)) {
+        if (operation.managementAuthRequired) {
+          setFinalOperationStatus(operation, MANAGEMENT_AUTH_REQUIRED_MESSAGE, true);
+        } else if (isCancellationError(error)) {
           setFinalOperationStatus(operation, "Stremio connection canceled.", true);
         } else {
           setFinalOperationStatus(
@@ -1700,6 +1981,7 @@
         const decision = await previewProviders(candidates, { addons }, operation);
         setStatus("Backing up and importing the confirmed manual provider selection...", false);
         const completed = await persistSelection(decision, operation);
+        requireCurrentProviderOperation(operation);
         byId("manualDescriptors").value = "";
         setFinalOperationStatus(
           operation,
@@ -1707,7 +1989,9 @@
           false
         );
       } catch (error) {
-        if (isCancellationError(error)) {
+        if (operation.managementAuthRequired) {
+          setFinalOperationStatus(operation, MANAGEMENT_AUTH_REQUIRED_MESSAGE, true);
+        } else if (isCancellationError(error)) {
           setFinalOperationStatus(operation, "Manual provider import canceled.", true);
         } else {
           setFinalOperationStatus(operation, error.message || "Manual provider import failed.", true);
@@ -1782,6 +2066,7 @@
     canExposePrivateInstall,
     clearPairingRecovery,
     createActivationRetryToken,
+    createManagementProfileRequester,
     createProfileManagementApi,
     createOneShotSettlement,
     createOperationMutex,

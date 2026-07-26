@@ -17,6 +17,460 @@ function descriptor(id, resources, transportUrl) {
   };
 }
 
+class FakeClassList {
+  constructor(names) {
+    this.names = new Set(names || []);
+  }
+
+  add(...names) {
+    for (const name of names) this.names.add(name);
+  }
+
+  remove(...names) {
+    for (const name of names) this.names.delete(name);
+  }
+
+  toggle(name, force) {
+    const enabled = force === undefined ? !this.names.has(name) : Boolean(force);
+    if (enabled) this.names.add(name);
+    else this.names.delete(name);
+    return enabled;
+  }
+
+  contains(name) {
+    return this.names.has(name);
+  }
+}
+
+class FakeElement {
+  constructor(id, classes) {
+    this.id = id || "";
+    this.value = "";
+    this.textContent = "";
+    this.disabled = false;
+    this.checked = false;
+    this.dataset = {};
+    this.children = [];
+    this.attributes = new Map();
+    this.listeners = new Map();
+    this.classList = new FakeClassList(classes);
+    this.open = false;
+  }
+
+  addEventListener(type, listener) {
+    const listeners = this.listeners.get(type) || [];
+    listeners.push(listener);
+    this.listeners.set(type, listeners);
+  }
+
+  dispatch(type) {
+    if (type === "click" && this.disabled) return;
+    const event = { currentTarget: this, preventDefault() {} };
+    for (const listener of this.listeners.get(type) || []) listener(event);
+  }
+
+  setAttribute(name, value) {
+    this.attributes.set(name, String(value));
+    if (name.startsWith("data-")) {
+      const key = name
+        .slice(5)
+        .replace(/-([a-z])/g, (_match, letter) => letter.toUpperCase());
+      this.dataset[key] = String(value);
+    }
+  }
+
+  removeAttribute(name) {
+    this.attributes.delete(name);
+  }
+
+  get href() {
+    return this.attributes.get("href") || "";
+  }
+
+  set href(value) {
+    this.attributes.set("href", String(value));
+  }
+
+  get src() {
+    return this.attributes.get("src") || "";
+  }
+
+  set src(value) {
+    this.attributes.set("src", String(value));
+  }
+
+  appendChild(child) {
+    this.children.push(child);
+    return child;
+  }
+
+  append(...children) {
+    this.children.push(...children);
+  }
+
+  replaceChildren(...children) {
+    this.children = children;
+  }
+
+  querySelectorAll(selector) {
+    const matches = [];
+    const visit = (element) => {
+      if (
+        selector === "input[data-provider-index]" &&
+        element.type === "checkbox" &&
+        Object.hasOwn(element.dataset, "providerIndex")
+      ) {
+        matches.push(element);
+      }
+      for (const child of element.children || []) visit(child);
+    };
+    for (const child of this.children) visit(child);
+    return matches;
+  }
+
+  focus() {}
+  select() {}
+  showModal() {
+    this.open = true;
+  }
+  close() {
+    this.open = false;
+  }
+}
+
+function createConfigureDocument(bootstrap) {
+  const html = fs.readFileSync(publicPath("configure.html"), "utf8");
+  const elements = new Map();
+  for (const match of html.matchAll(/<[^>]+\bid="([^"]+)"[^>]*>/g)) {
+    const markup = match[0];
+    const classes = /\bclass="([^"]*)"/.exec(markup);
+    const element = new FakeElement(
+      match[1],
+      classes ? classes[1].split(/\s+/).filter(Boolean) : []
+    );
+    element.disabled = /\sdisabled(?:\s|>|=)/.test(markup);
+    element.checked = /\schecked(?:\s|>|=)/.test(markup);
+    const copy = /\bdata-copy="([^"]+)"/.exec(markup);
+    if (copy) element.dataset.copy = copy[1];
+    if (/\bdata-management-action(?:\s|>|=)/.test(markup)) {
+      element.setAttribute("data-management-action", "");
+    }
+    elements.set(element.id, element);
+  }
+  elements.get("jumpgate-bootstrap").textContent = JSON.stringify(bootstrap);
+
+  const document = {
+    getElementById(id) {
+      return elements.get(id) || null;
+    },
+    createElement() {
+      return new FakeElement();
+    },
+    querySelectorAll(selector) {
+      if (selector === "[data-copy]") {
+        return [...elements.values()].filter((element) => Object.hasOwn(element.dataset, "copy"));
+      }
+      if (selector === "[data-management-action]") {
+        return [...elements.values()].filter((element) =>
+          element.attributes.has("data-management-action")
+        );
+      }
+      return [];
+    },
+    execCommand() {
+      return true;
+    },
+  };
+  return { document, elements };
+}
+
+function jsonResponse(status, body) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    async json() {
+      return body;
+    },
+  };
+}
+
+function managementAuthorityOptions(csrf) {
+  const authority = Object.freeze({ epoch: 1, csrf });
+  return {
+    authority,
+    getAuthority: () => authority,
+    isAuthorityCurrent: (candidate) => candidate === authority,
+  };
+}
+
+async function waitFor(predicate, message) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  assert.fail(message || "condition was not reached");
+}
+
+function deferredResponse() {
+  let resolve;
+  const promise = new Promise((settle) => {
+    resolve = settle;
+  });
+  let signal = null;
+  let aborted = false;
+  return {
+    wait(requestSignal) {
+      signal = requestSignal || null;
+      if (signal) {
+        aborted = signal.aborted;
+        signal.addEventListener("abort", () => {
+          aborted = true;
+        }, { once: true });
+      }
+      return promise;
+    },
+    respond(status, body) {
+      resolve(jsonResponse(status, body));
+    },
+    get signal() {
+      return signal;
+    },
+    get aborted() {
+      return aborted;
+    },
+  };
+}
+
+function elementText(element) {
+  return [element.textContent, ...(element.children || []).map(elementText)].join(" ").trim();
+}
+
+function createRaceHarness(route, stremioAccountClient) {
+  const { document, elements } = createConfigureDocument({
+    initial: { config: "config-safe", name: "Race profile" },
+  });
+  let storedPairing = null;
+  let pairingCount = 0;
+  let deviceCallCount = 0;
+  const providerCalls = [];
+  const browser = {
+    document,
+    location: {
+      origin: "https://bridge.example",
+      pathname: "/configure",
+      search: "",
+      hash: "",
+      assign() {},
+    },
+    history: { replaceState() {} },
+    navigator: {},
+    crypto: {
+      getRandomValues(bytes) {
+        bytes.fill(0x52);
+        return bytes;
+      },
+    },
+    btoa(value) {
+      return Buffer.from(value, "binary").toString("base64");
+    },
+    sessionStorage: {
+      getItem() {
+        return storedPairing;
+      },
+      setItem(_key, value) {
+        storedPairing = value;
+      },
+      removeItem() {
+        storedPairing = null;
+      },
+    },
+    alert() {},
+    confirm() {
+      return true;
+    },
+    JumpgateStremioAccount: stremioAccountClient
+      ? { createStremioAccountClient: () => stremioAccountClient }
+      : undefined,
+    async fetch(url, options) {
+      const request = options || {};
+      const method = request.method || "GET";
+      if (url === "/pair/activate") {
+        pairingCount += 1;
+        return jsonResponse(200, {
+          ok: true,
+          config: "config-safe",
+          name: `Session ${pairingCount}`,
+          managementCsrf: `csrf-${pairingCount}`,
+          bridgeBaseUrl: "https://bridge.example/_c/config-safe",
+          manifestUrl: "https://bridge.example/config-safe/manifest.json",
+          installUrl: "stremio://bridge.example/config-safe/manifest.json",
+        });
+      }
+      if (url === "/api/profile/devices") deviceCallCount += 1;
+      if (url.startsWith("/api/profile/providers") || url === "/api/profile/backups") {
+        providerCalls.push(`${method} ${url}`);
+      }
+      const routed = route
+        ? route({ url, method, request, deviceCallCount, pairingCount, providerCalls })
+        : undefined;
+      if (routed !== undefined) return routed;
+      if (url === "/api/profile/devices") {
+        return jsonResponse(200, { ok: true, devices: [], traktLinked: false });
+      }
+      if (url === "/api/profile/providers/preview") {
+        return jsonResponse(200, {
+          ok: true,
+          providers: [{ manifestId: "selected-provider", name: "Selected", gatewayEligible: true }],
+        });
+      }
+      if (url === "/api/profile/providers" && method === "GET") {
+        return jsonResponse(200, { ok: true, revision: 4, providers: [] });
+      }
+      if (url === "/api/profile/backups") {
+        return jsonResponse(200, { ok: true, backup: { id: "backup-safe" } });
+      }
+      if (url === "/api/profile/providers" && method === "PUT") {
+        return jsonResponse(200, { ok: true, count: 1, revision: 5 });
+      }
+      throw new Error(`unexpected request ${method} ${url}`);
+    },
+  };
+
+  client.mount(browser);
+  return {
+    elements,
+    providerCalls,
+    get deviceCallCount() {
+      return deviceCallCount;
+    },
+    async pair() {
+      const expected = pairingCount + 1;
+      elements.get("pairCode").value = "ABCD-EFGH";
+      elements.get("pairBtn").dispatch("click");
+      await waitFor(
+        () => elements.get("pairStatus").textContent.includes(`Session ${expected}`),
+        `pairing session ${expected} did not complete`
+      );
+    },
+    startManualImport() {
+      elements.get("manualDescriptors").value = JSON.stringify([
+        descriptor("selected-provider", ["stream"]),
+      ]);
+      elements.get("previewManualBtn").dispatch("click");
+    },
+  };
+}
+
+async function mountPairedProviderHarness(expiry) {
+  const { document, elements } = createConfigureDocument({
+    initial: { config: "config-safe", name: "Regression profile" },
+  });
+  const providerCalls = [];
+  let expirySignal = null;
+  let storedPairing = null;
+  const selected = descriptor("selected-provider", ["stream"]);
+
+  const browser = {
+    document,
+    location: {
+      origin: "https://bridge.example",
+      pathname: "/configure",
+      search: "",
+      hash: "",
+      assign() {},
+    },
+    history: { replaceState() {} },
+    navigator: {},
+    crypto: {
+      getRandomValues(bytes) {
+        bytes.fill(0x41);
+        return bytes;
+      },
+    },
+    btoa(value) {
+      return Buffer.from(value, "binary").toString("base64");
+    },
+    sessionStorage: {
+      getItem() {
+        return storedPairing;
+      },
+      setItem(_key, value) {
+        storedPairing = value;
+      },
+      removeItem() {
+        storedPairing = null;
+      },
+    },
+    alert() {},
+    confirm() {
+      return true;
+    },
+    async fetch(url, options) {
+      const request = options || {};
+      const method = request.method || "GET";
+      if (url === "/pair/activate") {
+        return jsonResponse(200, {
+          ok: true,
+          config: "config-safe",
+          name: "Regression profile",
+          managementCsrf: "csrf-live",
+          bridgeBaseUrl: "https://bridge.example/_c/config-safe",
+          manifestUrl: "https://bridge.example/config-safe/manifest.json",
+          installUrl: "stremio://bridge.example/config-safe/manifest.json",
+        });
+      }
+      if (url === "/api/profile/devices") {
+        return jsonResponse(200, { ok: true, devices: [], traktLinked: false });
+      }
+      if (url.startsWith("/api/profile/providers") || url === "/api/profile/backups") {
+        providerCalls.push(`${method} ${url}`);
+        if (url === expiry.url && method === expiry.method) {
+          expirySignal = request.signal;
+          return jsonResponse(expiry.status, { ok: false, error: expiry.error });
+        }
+      }
+      if (url === "/api/profile/providers/preview") {
+        return jsonResponse(200, {
+          ok: true,
+          providers: [{ manifestId: "selected-provider", name: "Selected", gatewayEligible: true }],
+        });
+      }
+      if (url === "/api/profile/providers" && method === "GET") {
+        return jsonResponse(200, { ok: true, revision: 4, providers: [] });
+      }
+      if (url === "/api/profile/backups") {
+        return jsonResponse(200, { ok: true, backup: { id: "backup-safe" } });
+      }
+      if (url === "/api/profile/providers" && method === "PUT") {
+        return jsonResponse(200, { ok: true, count: 1, revision: 5 });
+      }
+      throw new Error(`unexpected request ${method} ${url}`);
+    },
+  };
+
+  client.mount(browser);
+  elements.get("pairCode").value = "ABCD-EFGH";
+  elements.get("pairBtn").dispatch("click");
+  await waitFor(
+    () => elements.get("previewManualBtn").disabled === false,
+    "pairing did not enable provider actions"
+  );
+  elements.get("manualDescriptors").value = JSON.stringify([selected]);
+  elements.get("previewManualBtn").dispatch("click");
+  if (expiry.url !== "/api/profile/providers/preview") {
+    await waitFor(
+      () => !elements.get("providerPreview").classList.contains("hidden"),
+      "provider preview did not open"
+    );
+    elements.get("confirmProvidersBtn").dispatch("click");
+  }
+  await waitFor(
+    () => /Management authorization expired/.test(elements.get("pairStatus").textContent),
+    "management expiry transition did not render"
+  );
+  return { elements, providerCalls, expirySignal };
+}
+
 test("resource discovery keeps stream and subtitle descriptors and excludes Jumpgate", () => {
   const stream = descriptor("streamer", ["stream"]);
   const subtitles = descriptor("subber", [{ name: "subtitles", types: ["movie"] }]);
@@ -145,6 +599,360 @@ test("operation mutex and one-shot settlement keep one explicit owner", async ()
   assert.deepEqual(events, ["settled", "resolve"]);
   assert.equal(stremio.release(), true);
   assert.ok(mutex.acquire("manual"));
+});
+
+for (const expiry of [
+  {
+    name: "preview",
+    method: "POST",
+    url: "/api/profile/providers/preview",
+    status: 401,
+    error: "management_auth_required",
+    expectedCalls: ["POST /api/profile/providers/preview"],
+  },
+  {
+    name: "backup",
+    method: "POST",
+    url: "/api/profile/backups",
+    status: 401,
+    error: "management_auth_required",
+    expectedCalls: [
+      "POST /api/profile/providers/preview",
+      "GET /api/profile/providers",
+      "POST /api/profile/backups",
+    ],
+  },
+  {
+    name: "provider PUT",
+    method: "PUT",
+    url: "/api/profile/providers",
+    status: 401,
+    error: "management_auth_required",
+    expectedCalls: [
+      "POST /api/profile/providers/preview",
+      "GET /api/profile/providers",
+      "POST /api/profile/backups",
+      "PUT /api/profile/providers",
+    ],
+  },
+]) {
+  test(`management expiry during ${expiry.name} aborts and requires re-pairing`, async () => {
+    const { elements, providerCalls, expirySignal } = await mountPairedProviderHarness(expiry);
+
+    assert.deepEqual(providerCalls, expiry.expectedCalls);
+    assert.equal(expirySignal.aborted, true);
+    assert.equal(elements.get("pairCode").value, "");
+    assert.equal(elements.get("previewManualBtn").disabled, true);
+    assert.equal(elements.get("connectStremioBtn").disabled, true);
+    assert.equal(elements.get("installConfiguredBtn").disabled, true);
+    assert.equal(elements.get("workspaceStatus").dataset.state, "pair");
+    assert.equal(elements.get("profileManagement").classList.contains("hidden"), true);
+    assert.equal(elements.get("providerPreview").classList.contains("hidden"), true);
+    assert.match(elements.get("stremioStatus").textContent, /Generate a new pairing code/);
+
+    elements.get("previewManualBtn").dispatch("click");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(providerCalls, expiry.expectedCalls);
+  });
+}
+
+test("a stale 401 after re-pair cannot clear the newer authority or UI", async () => {
+  const oldDevices = deferredResponse();
+  const harness = createRaceHarness(({ url, request, deviceCallCount }) => {
+    if (url === "/api/profile/devices" && deviceCallCount === 1) {
+      return oldDevices.wait(request.signal);
+    }
+    if (url === "/api/profile/devices" && deviceCallCount === 2) {
+      return jsonResponse(200, {
+        ok: true,
+        devices: [{ deviceId: "device_new", displayName: "New session device", current: true }],
+        traktLinked: false,
+      });
+    }
+    return undefined;
+  });
+
+  await harness.pair();
+  await waitFor(() => oldDevices.signal !== null, "old device refresh did not start");
+  await harness.pair();
+  await waitFor(
+    () => harness.elements.get("managementStatus").textContent === "Paired-profile state refreshed.",
+    "new authority refresh did not finish"
+  );
+  assert.equal(oldDevices.aborted, true);
+
+  oldDevices.respond(401, { ok: false, error: "management_auth_required" });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.match(harness.elements.get("pairStatus").textContent, /Paired with Session 2/);
+  assert.doesNotMatch(harness.elements.get("pairStatus").textContent, /expired/i);
+  assert.equal(harness.elements.get("previewManualBtn").disabled, false);
+  assert.equal(harness.elements.get("profileManagement").classList.contains("hidden"), false);
+  assert.match(elementText(harness.elements.get("deviceList")), /New session device/);
+  assert.equal(
+    harness.elements.get("managementStatus").textContent,
+    "Paired-profile state refreshed."
+  );
+});
+
+test("a delayed automatic device refresh cannot repopulate state after auth expiry", async () => {
+  const oldDevices = deferredResponse();
+  const harness = createRaceHarness(({ url, method, request, deviceCallCount }) => {
+    if (url === "/api/profile/devices" && deviceCallCount === 1) {
+      return oldDevices.wait(request.signal);
+    }
+    if (url === "/api/profile/providers/preview" && method === "POST") {
+      return jsonResponse(401, { ok: false, error: "management_auth_required" });
+    }
+    return undefined;
+  });
+
+  await harness.pair();
+  await waitFor(() => oldDevices.signal !== null, "automatic device refresh did not start");
+  harness.startManualImport();
+  await waitFor(
+    () => /Management authorization expired/.test(harness.elements.get("pairStatus").textContent),
+    "provider expiry did not invalidate authority"
+  );
+  assert.equal(oldDevices.aborted, true);
+
+  oldDevices.respond(200, {
+    ok: true,
+    devices: [{ deviceId: "device_stale", displayName: "Stale device", current: true }],
+    traktLinked: true,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.doesNotMatch(elementText(harness.elements.get("deviceList")), /Stale device/);
+  assert.match(harness.elements.get("pairStatus").textContent, /Generate a new pairing code/);
+  assert.match(harness.elements.get("managementStatus").textContent, /Management authorization expired/);
+  assert.equal(harness.elements.get("profileManagement").classList.contains("hidden"), true);
+  assert.equal(harness.elements.get("traktManagementState").textContent, "Connection status unavailable");
+});
+
+for (const delayed of [
+  {
+    name: "preview",
+    method: "POST",
+    url: "/api/profile/providers/preview",
+    body: {
+      ok: true,
+      providers: [{ manifestId: "selected-provider", name: "Selected", gatewayEligible: true }],
+    },
+    expectedCalls: ["POST /api/profile/providers/preview"],
+  },
+  {
+    name: "backup",
+    method: "POST",
+    url: "/api/profile/backups",
+    body: { ok: true, backup: { id: "backup-late" } },
+    expectedCalls: [
+      "POST /api/profile/providers/preview",
+      "GET /api/profile/providers",
+      "POST /api/profile/backups",
+    ],
+  },
+  {
+    name: "PUT",
+    method: "PUT",
+    url: "/api/profile/providers",
+    body: { ok: true, count: 1, revision: 5 },
+    expectedCalls: [
+      "POST /api/profile/providers/preview",
+      "GET /api/profile/providers",
+      "POST /api/profile/backups",
+      "PUT /api/profile/providers",
+    ],
+  },
+]) {
+  test(`delayed ${delayed.name} completion cannot advance state after invalidation`, async () => {
+    const lateProviderResponse = deferredResponse();
+    const harness = createRaceHarness(({ url, method, request, deviceCallCount }) => {
+      if (url === "/api/profile/devices" && deviceCallCount === 2) {
+        return jsonResponse(401, { ok: false, error: "management_auth_required" });
+      }
+      if (url === delayed.url && method === delayed.method) {
+        return lateProviderResponse.wait(request.signal);
+      }
+      return undefined;
+    });
+
+    await harness.pair();
+    await waitFor(
+      () => harness.elements.get("refreshDevicesBtn").disabled === false,
+      "automatic management refresh did not settle"
+    );
+    harness.startManualImport();
+    if (delayed.name !== "preview") {
+      await waitFor(
+        () => !harness.elements.get("providerPreview").classList.contains("hidden"),
+        "provider preview did not open"
+      );
+      harness.elements.get("confirmProvidersBtn").dispatch("click");
+    }
+    await waitFor(() => lateProviderResponse.signal !== null, `${delayed.name} request did not start`);
+
+    harness.elements.get("refreshDevicesBtn").dispatch("click");
+    await waitFor(
+      () => /Management authorization expired/.test(harness.elements.get("pairStatus").textContent),
+      "management refresh did not invalidate authority"
+    );
+    assert.equal(lateProviderResponse.aborted, true);
+
+    lateProviderResponse.respond(200, delayed.body);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.deepEqual(harness.providerCalls, delayed.expectedCalls);
+    assert.equal(harness.elements.get("workspaceStatus").dataset.state, "pair");
+    assert.equal(harness.elements.get("installConfiguredBtn").disabled, true);
+    assert.equal(harness.elements.get("providerPreview").classList.contains("hidden"), true);
+    assert.doesNotMatch(harness.elements.get("stremioStatus").textContent, /Imported .*providers/i);
+    assert.match(harness.elements.get("stremioStatus").textContent, /Management authorization expired/);
+  });
+}
+
+test("invalidation after persistSelection prevents manual import success rendering", async () => {
+  const latePut = deferredResponse();
+  let countReads = 0;
+  let harness;
+  harness = createRaceHarness(({ url, method, request, deviceCallCount }) => {
+    if (url === "/api/profile/devices" && deviceCallCount === 2) {
+      return jsonResponse(401, { ok: false, error: "management_auth_required" });
+    }
+    if (url === "/api/profile/providers" && method === "PUT") {
+      return latePut.wait(request.signal);
+    }
+    return undefined;
+  });
+
+  await harness.pair();
+  await waitFor(
+    () => harness.elements.get("refreshDevicesBtn").disabled === false,
+    "automatic management refresh did not settle"
+  );
+  harness.startManualImport();
+  await waitFor(
+    () => !harness.elements.get("providerPreview").classList.contains("hidden"),
+    "provider preview did not open"
+  );
+  harness.elements.get("confirmProvidersBtn").dispatch("click");
+  await waitFor(() => latePut.signal !== null, "provider PUT did not start");
+
+  const imported = {
+    ok: true,
+    revision: 5,
+    get count() {
+      countReads += 1;
+      if (countReads === 3) harness.elements.get("refreshDevicesBtn").dispatch("click");
+      return 1;
+    },
+  };
+  latePut.respond(200, imported);
+  await waitFor(
+    () => /Management authorization expired/.test(harness.elements.get("pairStatus").textContent),
+    "post-persist invalidation did not run"
+  );
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(countReads, 3);
+  assert.equal(harness.elements.get("workspaceStatus").dataset.state, "pair");
+  assert.equal(harness.elements.get("installConfiguredBtn").disabled, true);
+  assert.doesNotMatch(harness.elements.get("stremioStatus").textContent, /Imported .*providers/i);
+  assert.match(harness.elements.get("stremioStatus").textContent, /Management authorization expired/);
+});
+
+test("re-pair synchronously clears stalled approval material and ignores late approval", async () => {
+  const expiryMessage =
+    "Management authorization expired. Generate a new pairing code in Jumpgate Manager, enter it here, and pair again before changing providers.";
+  let resolveCollection;
+  let approvalSignal = null;
+  const collection = new Promise((resolve) => {
+    resolveCollection = resolve;
+  });
+  const accountClient = {
+    async createLinkSession({ signal }) {
+      approvalSignal = signal;
+      return {
+        code: "APPROVE-ME",
+        link: "https://stremio.example/approve",
+        qrcode: "data:image/png;base64,cXJjb2Rl",
+        expiresAt: Date.now() + 60_000,
+        readAddonCollection({ onApproved }) {
+          return collection.then((value) => {
+            onApproved();
+            return value;
+          });
+        },
+      };
+    },
+  };
+  const harness = createRaceHarness(({ url, deviceCallCount }) => {
+    if (url === "/api/profile/devices" && deviceCallCount === 3) {
+      return jsonResponse(401, { ok: false, error: "management_auth_required" });
+    }
+    return undefined;
+  }, accountClient);
+
+  await harness.pair();
+  harness.elements.get("connectStremioBtn").dispatch("click");
+  await waitFor(
+    () => harness.elements.get("stremioCode").textContent === "APPROVE-ME",
+    "approval material was not rendered"
+  );
+  assert.equal(harness.elements.get("stremioLink").classList.contains("hidden"), false);
+  assert.ok(harness.elements.get("stremioQr").src);
+  assert.ok(harness.elements.get("stremioApprovalLink").href);
+
+  await harness.pair();
+  assert.equal(approvalSignal.aborted, true);
+  assert.equal(harness.elements.get("stremioCode").textContent, "");
+  assert.equal(harness.elements.get("stremioQr").src, "");
+  assert.equal(harness.elements.get("stremioApprovalLink").href, "");
+  assert.equal(harness.elements.get("stremioLink").classList.contains("hidden"), true);
+  assert.equal(harness.elements.get("providerPreview").classList.contains("hidden"), true);
+  assert.equal(harness.elements.get("cancelStremioBtn").classList.contains("hidden"), true);
+  assert.equal(harness.elements.get("stremioStatus").textContent, "");
+
+  await waitFor(
+    () => harness.deviceCallCount >= 2 && harness.elements.get("refreshDevicesBtn").disabled === false,
+    "new authority refresh did not settle"
+  );
+  harness.elements.get("refreshDevicesBtn").dispatch("click");
+  await waitFor(
+    () => harness.elements.get("stremioStatus").textContent === expiryMessage,
+    "new authority expiry did not replace provider status"
+  );
+  assert.equal(harness.elements.get("pairStatus").textContent, expiryMessage);
+
+  resolveCollection({ addons: [descriptor("late-provider", ["stream"])] });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(harness.elements.get("stremioStatus").textContent, expiryMessage);
+  assert.equal(harness.elements.get("pairStatus").textContent, expiryMessage);
+  assert.equal(harness.elements.get("stremioCode").textContent, "");
+  assert.equal(harness.elements.get("stremioQr").src, "");
+  assert.equal(harness.elements.get("stremioApprovalLink").href, "");
+  assert.equal(harness.elements.get("stremioStatus").textContent, expiryMessage);
+});
+
+test("non-management provider errors preserve active management authority", async () => {
+  let authRequiredCalls = 0;
+  const authority = managementAuthorityOptions("csrf-live");
+  const request = client.createManagementProfileRequester({
+    getAuthority: authority.getAuthority,
+    isAuthorityCurrent: authority.isAuthorityCurrent,
+    onAuthRequired() {
+      authRequiredCalls += 1;
+    },
+    async fetch() {
+      return jsonResponse(409, { ok: false, error: "provider_revision_conflict" });
+    },
+  });
+
+  await assert.rejects(
+    () => request("/api/profile/providers", { method: "PUT" }),
+    (error) => error.code === "provider_revision_conflict" && error.status === 409
+  );
+  assert.equal(authRequiredCalls, 0);
 });
 
 test("chunked previews preserve order and cap the default selection", async () => {
@@ -438,8 +1246,10 @@ test("paired-profile lifecycle client uses fixed methods, CSRF, and same-origin 
     ["POST /api/profile/trakt/connect", { status: 200, body: { ok: true, url: "/api/profile/trakt/connect/continue" } }],
     ["DELETE /api/profile", { status: 202, body: { ok: true, status: "pending" } }],
   ]);
+  const authority = managementAuthorityOptions("csrf_private_value");
   const api = client.createProfileManagementApi({
-    csrf: "csrf_private_value",
+    authority: authority.authority,
+    isAuthorityCurrent: authority.isAuthorityCurrent,
     origin: "https://bridge.example",
     async fetch(url, options) {
       calls.push({ url, options });
@@ -481,6 +1291,21 @@ test("paired-profile lifecycle client uses fixed methods, CSRF, and same-origin 
     assert.equal(call.options.credentials, "same-origin");
     assert.equal(call.options.cache, "no-store");
   }
+});
+
+test("profile management uses authority CSRF and rejects a mismatched duplicate", () => {
+  const authority = managementAuthorityOptions("csrf-authority");
+  assert.throws(
+    () =>
+      client.createProfileManagementApi({
+        csrf: "csrf-mismatch",
+        authority: authority.authority,
+        isAuthorityCurrent: authority.isAuthorityCurrent,
+        origin: "https://bridge.example",
+        fetch: async () => jsonResponse(200, { ok: true }),
+      }),
+    /CSRF does not match authority/
+  );
 });
 
 test("paired-device parsing exposes display metadata only and trusts only explicit current markers", () => {
@@ -552,8 +1377,10 @@ test("management errors are sanitized and Trakt redirects fail closed across ori
     /unsafe Trakt connection route/
   );
 
+  const authority = managementAuthorityOptions("csrf_value");
   const api = client.createProfileManagementApi({
-    csrf: "csrf_value",
+    authority: authority.authority,
+    isAuthorityCurrent: authority.isAuthorityCurrent,
     origin: "https://bridge.example",
     async fetch() {
       return {
@@ -573,7 +1400,8 @@ test("management errors are sanitized and Trakt redirects fail closed across ori
   );
 
   const synchronousDelete = client.createProfileManagementApi({
-    csrf: "csrf_value",
+    authority: authority.authority,
+    isAuthorityCurrent: authority.isAuthorityCurrent,
     origin: "https://bridge.example",
     async fetch() {
       return {
@@ -633,7 +1461,10 @@ test("owned production sources contain no Stremio mutation or rollback path", ()
   assert.equal((accountSource.match(/type:\s*"AddonCollectionGet"/g) || []).length, 1);
   assert.equal((accountSource.match(/\/api\/addonCollectionGet/g) || []).length, 1);
   assert.match(configureSource, /const collection = await session\.readAddonCollection\(\{/);
-  assert.match(configureSource, /onApproved\(\) \{\s*clearApprovalMaterial\(operation\)/);
+  assert.match(
+    configureSource,
+    /onApproved\(\) \{\s*if \(!providerOperationIsCurrent\(operation\)\) return;\s*clearApprovalMaterial\(operation\)/
+  );
   assert.match(configureSource, /const completed = await persistSelection\(decision, operation\)/);
   assert.match(configureSource, /installConfigured\(\)/);
   assert.match(configureSource, /Provider import failed\. Your Stremio account was not changed\./);
