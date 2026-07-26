@@ -17,9 +17,11 @@ const { assertRubyPsych } = require("./tooling-prerequisites");
 
 const DEFAULT_ROOT = path.join(__dirname, "..", "..");
 const WORKFLOW_ACTION_PARSER = path.join(__dirname, "workflow-action-refs.rb");
+const WORKFLOW_RELEASE_METADATA_PARSER_PATH =
+  "scripts/ci/workflow-release-metadata.rb";
 const WORKFLOW_RELEASE_METADATA_PARSER = path.join(
-  __dirname,
-  "workflow-release-metadata.rb"
+  DEFAULT_ROOT,
+  WORKFLOW_RELEASE_METADATA_PARSER_PATH
 );
 const REMOTE_ACTION_PATTERN =
   /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*@[a-f0-9]{40}$/;
@@ -93,6 +95,7 @@ const PUBLICATION_POLICY_FILES = Object.freeze([
   ".github/ISSUE_TEMPLATE/config.yml",
   ".github/workflows/fly-deploy.yml",
   "scripts/ci/RELEASE_GATES.md",
+  WORKFLOW_RELEASE_METADATA_PARSER_PATH,
 ]);
 const REGULAR_GIT_FILE_MODES = new Set(["100644", "100755"]);
 const GIT_OBJECT_ID_LENGTHS = Object.freeze({ sha1: 40, sha256: 64 });
@@ -989,7 +992,7 @@ function validatePackLifecycleScripts(manifest) {
     );
 }
 
-function validatePublicationGate(documents) {
+function validatePublicationGate(documents, options = {}) {
   if (!documents || typeof documents !== "object" || Array.isArray(documents)) {
     throw new TypeError("publication documents must be an object");
   }
@@ -1106,7 +1109,9 @@ function validatePublicationGate(documents) {
   if (typeof workflow === "string") {
     let metadata = null;
     try {
-      metadata = parseWorkflowReleaseMetadata(workflow);
+      metadata = parseWorkflowReleaseMetadata(workflow, {
+        parserPath: options.workflowReleaseMetadataParserPath,
+      });
     } catch (_error) {
       violations.push(
         ".github/workflows/fly-deploy.yml: release metadata parser failed closed"
@@ -1131,6 +1136,19 @@ function validatePublicationGate(documents) {
 
     const emittedContexts = [];
     const jobs = metadata ? metadata.jobs : {};
+    const expectedJobIds = [
+      "container-smoke",
+      "deploy",
+      "fingerprint-parity",
+      "postgres-live",
+      "quality",
+      "redis-live",
+    ];
+    if (JSON.stringify(Object.keys(jobs).sort()) !== JSON.stringify(expectedJobIds)) {
+      violations.push(
+        ".github/workflows/fly-deploy.yml: release workflow job set must be exact"
+      );
+    }
     const jobNames = Object.values(jobs)
       .map((job) => (job && typeof job === "object" ? job.name : null))
       .filter((name) => typeof name === "string");
@@ -1704,7 +1722,14 @@ function runPolicy(root = DEFAULT_ROOT, options = {}) {
         // The publication validator reports selected-index omissions uniformly.
       }
     }
-    violations.push(...validatePublicationGate(publicationDocuments));
+    violations.push(
+      ...validatePublicationGate(publicationDocuments, {
+        workflowReleaseMetadataParserPath: path.join(
+          materializedRoot,
+          ...WORKFLOW_RELEASE_METADATA_PARSER_PATH.split("/")
+        ),
+      })
+    );
 
     let manifest = null;
     let lockfile = null;
@@ -1872,6 +1897,7 @@ module.exports = {
   PUBLIC_REPOSITORY_LINE,
   PUBLIC_REPOSITORY_URL,
   PUBLICATION_POLICY_FILES,
+  WORKFLOW_RELEASE_METADATA_PARSER_PATH,
   PUBLISH_LIFECYCLE_SCRIPTS,
   REDIS_V5_FIXTURE_SHA256,
   REDIS_V5_POLICY_FILES,

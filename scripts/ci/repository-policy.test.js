@@ -23,6 +23,7 @@ const {
   REDIS_V5_FIXTURE_SHA256,
   REDIS_V5_POLICY_FILES,
   REDIS_V5_SCRIPT_LOADER_PATH,
+  WORKFLOW_RELEASE_METADATA_PARSER_PATH,
   findActionReferences,
   inspectPackageArtifact,
   isAllowedPackagePath,
@@ -1021,6 +1022,22 @@ test("publication gate binds the canonical repository and private advisory chann
     );
   }
 
+  const additionalReleaseJob = {
+    ...documents,
+    ".github/workflows/fly-deploy.yml": documents[
+      ".github/workflows/fly-deploy.yml"
+    ].replace(
+      `\n  deploy:\n    name: ${DEPLOY_CHECK_CONTEXT}\n`,
+      `\n  additional-check:\n    name: Additional policy check\n    runs-on: ubuntu-latest\n    steps:\n      - run: \"true\"\n\n  deploy:\n    name: ${DEPLOY_CHECK_CONTEXT}\n`
+    ),
+  };
+  assert.equal(
+    validatePublicationGate(additionalReleaseJob).some((value) =>
+      value.includes("release workflow job set must be exact")
+    ),
+    true
+  );
+
   const missingRequiredContext = {
     ...documents,
     "scripts/ci/RELEASE_GATES.md": documents["scripts/ci/RELEASE_GATES.md"].replace(
@@ -1085,6 +1102,26 @@ for (const objectFormat of ["sha1", "sha256"]) {
     }
     assert.deepEqual(validatePackageLicenseEntries(packResult.files), []);
 
+    assert.deepEqual(runPolicy(root, { env }).violations, []);
+    const releaseParserBytes = readIndexedFileBytes(
+      root,
+      parsed,
+      WORKFLOW_RELEASE_METADATA_PARSER_PATH,
+      { env }
+    );
+    writeIndexBlob(
+      root,
+      env,
+      WORKFLOW_RELEASE_METADATA_PARSER_PATH,
+      Buffer.from("exit 1\n", "utf8")
+    );
+    assert.equal(
+      runPolicy(root, { env }).violations.some((value) =>
+        value.includes("release metadata parser failed closed")
+      ),
+      true
+    );
+    writeIndexBlob(root, env, WORKFLOW_RELEASE_METADATA_PARSER_PATH, releaseParserBytes);
     assert.deepEqual(runPolicy(root, { env }).violations, []);
     assert.deepEqual(
       runCommand(root, "git", ["ls-files", "--stage", "-z"]),
