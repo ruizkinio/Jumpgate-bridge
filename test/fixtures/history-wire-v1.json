@@ -1,0 +1,109 @@
+{
+  "formatVersion": 1,
+  "algorithm": "history-wire-v1",
+  "claim": {
+    "method": "POST",
+    "path": "/v1/playback/claim",
+    "requestRequiredFields": [
+      "attemptId",
+      "fingerprints",
+      "intentUrlHash",
+      "launchedAt"
+    ],
+    "requestOptionalFields": [
+      "client"
+    ],
+    "responseCommonFields": [
+      "status",
+      "sessionId",
+      "sessionRevision",
+      "historyGrant",
+      "historyGrantKind"
+    ],
+    "claimedResponseFields": [
+      "context",
+      "claimedAt",
+      "expiresAt"
+    ],
+    "negativeStatuses": [
+      "ambiguous",
+      "expired",
+      "not_found"
+    ]
+  },
+  "history": {
+    "method": "POST",
+    "path": "/v1/history/events",
+    "headers": [
+      "authorization",
+      "x-jumpgate-history-grant",
+      "idempotency-key"
+    ],
+    "events": [
+      "start",
+      "progress",
+      "pause",
+      "background",
+      "resume",
+      "stop",
+      "completion"
+    ],
+    "requestRequiredFields": [
+      "event",
+      "sessionRevision",
+      "positionMs",
+      "durationMs",
+      "watchedMs"
+    ],
+    "requestOptionalFields": [
+      "playbackPreferences"
+    ],
+    "acceptedResponseFields": [
+      "ok",
+      "status",
+      "grantKind",
+      "event",
+      "sessionId",
+      "sessionState",
+      "sessionRevision",
+      "history",
+      "dispatchIntent"
+    ],
+    "grantKinds": [
+      "canonical",
+      "local",
+      "negative"
+    ],
+    "acceptedStatuses": [
+      "applied",
+      "local_only",
+      "suppressed"
+    ],
+    "sessionStates": [
+      "playing",
+      "paused",
+      "backgrounded",
+      "released"
+    ],
+    "terminalEvents": [
+      "stop",
+      "completion"
+    ]
+  },
+  "release": {
+    "method": "POST",
+    "path": "/v1/playback/release",
+    "requestRequiredFields": [
+      "sessionId",
+      "terminalReceiptId"
+    ],
+    "terminalReceiptSource": "history-event-idempotency-key"
+  },
+  "retiredPaths": [
+    "/v1/trakt/scrobble/start",
+    "/v1/trakt/scrobble/pause",
+    "/v1/trakt/scrobble/resume",
+    "/v1/trakt/scrobble/stop",
+    "/v1/trakt/scrobble/completion"
+  ]
+}

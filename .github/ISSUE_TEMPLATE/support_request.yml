@@ -1,0 +1,102 @@
+name: Support request
+description: Request pre-release Bridge setup or troubleshooting help without private data.
+title: "[Support]: "
+labels: []
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Support is best effort for pre-release Bridge code. Private vulnerability reporting is available through the verified link in SECURITY.md. Do not disclose a vulnerability here or anywhere public.
+
+        Refuse any request to post configured addon URLs, pairing codes, management links, device/profile tokens, provider or debrid URLs/headers/cookies, Stremio credentials, Trakt or TMDB credentials, Fly.io or deployment secrets, or raw private logs. Maintainers do not need those values for public triage.
+  - type: checkboxes
+    id: support_checks
+    attributes:
+      label: Public request checks
+      options:
+        - label: This request does not describe a security vulnerability or suspected cross-profile data exposure.
+          required: true
+        - label: I removed all private URLs, capabilities, credentials, cookies, secrets, identifiers, and raw logs.
+          required: true
+        - label: I have read the component README and SUPPORT.md.
+          required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment
+      description: Do not include the deployment origin or Fly application name.
+      options:
+        - Project-hosted pre-release instance
+        - Self-hosted production mode
+        - Self-hosted development or test mode
+        - Planning a self-hosted deployment
+        - Unsure
+    validations:
+      required: true
+  - type: input
+    id: bridge_version
+    attributes:
+      label: Bridge version or commit
+      placeholder: "3.0.0 or commit SHA"
+    validations:
+      required: true
+  - type: dropdown
+    id: topic
+    attributes:
+      label: Topic
+      options:
+        - Pairing and profile setup
+        - Provider import
+        - Playback or source claims
+        - History or resume
+        - Trakt or TMDB setup
+        - Subtitles
+        - PostgreSQL, Redis, or object storage
+        - HTTPS, proxy, or deployment topology
+        - Privacy request channel
+        - Other Bridge support
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: What are you trying to do?
+      description: Describe the goal without account, profile, provider, host, or media identifiers.
+    validations:
+      required: true
+  - type: textarea
+    id: attempted
+    attributes:
+      label: What have you tried?
+      description: Include sanitized commands and results. Do not paste environment files or full logs.
+      placeholder: |
+        1. Ran ...
+        2. Checked ...
+        3. Received status/error code ...
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Sanitized environment
+      description: List versions and topology only. Replace every hostname and identifier with a placeholder.
+      placeholder: |
+        Node: 24.x
+        Mode: self-hosted production
+        Storage: PostgreSQL + Redis + private S3-compatible store
+        Proxy hops: 1
+    validations:
+      required: false
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Minimal sanitized diagnostics
+      description: Manually reviewed excerpt only. No raw private logs, HAR files, dumps, screenshots, or secret values.
+      render: shell
+    validations:
+      required: false
+  - type: markdown
+    attributes:
+      value: |
+        No private hosted privacy-request channel is published yet. Do not include a configured URL, profile ID, token, or other identifying value in this public form.

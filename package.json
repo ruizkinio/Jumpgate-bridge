@@ -1,0 +1,46 @@
+{
+  "name": "jumpgate-bridge",
+  "version": "3.0.0",
+  "private": true,
+  "description": "Private Stremio-to-Jumpgate provider gateway with profile-scoped source claims",
+  "license": "MIT",
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "lib/",
+    "migrations/",
+    "public/",
+    "README.md"
+  ],
+  "scripts": {
+    "start": "node index.js",
+    "start:local": "node --env-file=.env index.js",
+    "provider-protocol": "node scripts/activate-provider-mutation-protocol.js",
+    "playback-claim-protocol": "node scripts/playback-claim-writer-protocol.js",
+    "release-protocols": "node scripts/production-release-protocols.js apply-env",
+    "secrets:generate": "node -e \"const {randomBytes}=require('node:crypto');const secret=()=>randomBytes(32).toString('base64url');const id='primary-'+new Date().getUTCFullYear();console.log('CONFIG_SECRET='+secret());console.log('JUMPGATE_TOKEN_PEPPER='+secret());console.log('JUMPGATE_ENVELOPE_PRIMARY_KEY_ID='+id);console.log('JUMPGATE_ENVELOPE_KEYRING='+JSON.stringify([{id,key:secret()}]));\"",
+    "test": "node --test",
+    "test:redis:subtitle": "node scripts/ci/node-test-gate.js --no-skips --expected-tests=9 -- --test-timeout=120000 test/storage-redis-subtitle-delivery.test.js",
+    "test:redis:combined": "node scripts/ci/node-test-gate.js --no-skips --expected-tests=48 -- --test-timeout=120000 test/storage-redis-integration.test.js test/storage-redis-subtitle-delivery.test.js test/provider-snapshot-recovery-integration.test.js test/playback-claim-writer-protocol-redis.test.js",
+    "policy": "node scripts/ci/repository-policy.js"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "3.1085.0",
+    "better-sqlite3": "11.10.0",
+    "express": "^4.18.0",
+    "node-fetch": "^2.7.0",
+    "pg": "8.22.0",
+    "redis": "5.12.1",
+    "yauzl": "3.4.0"
+  },
+  "allowScripts": {
+    "better-sqlite3@11.10.0": true
+  },
+  "devDependencies": {
+    "markdown-it": "14.3.0",
+    "smol-toml": "1.7.0"
+  }
+}

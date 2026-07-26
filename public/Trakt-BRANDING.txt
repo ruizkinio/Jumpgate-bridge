@@ -1,0 +1,5 @@
+Official Trakt default negative logo lockup
+Source: https://trakt.tv/branding
+Asset: https://media-og.trakt.tv/assets/logos/logo.default.negative-7c28b25bb270dc291faa5d7794b9bfd6fcdf4698ee5e6504151167fbecd8a197.svg
+
+Trakt requires integrations to use its supplied logos without altering the logo or its colors. Trakt names and logos remain Trakt trademarks; this file records provenance and does not grant additional rights.

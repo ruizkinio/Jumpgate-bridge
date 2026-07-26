@@ -1,0 +1,71 @@
+name: Feature request
+description: Propose a bounded Bridge change with privacy and compatibility impact.
+title: "[Feature]: "
+labels: []
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Private vulnerability reporting is available through the verified link in SECURITY.md. Do not disclose a vulnerability here or anywhere public.
+
+        Do not include configured addon URLs, pairing codes, management links, device/profile tokens, provider or debrid URLs/headers/cookies, Stremio credentials, Trakt or TMDB credentials, Fly.io or deployment secrets, or raw private logs.
+  - type: checkboxes
+    id: proposal_checks
+    attributes:
+      label: Public proposal checks
+      options:
+        - label: This proposal is not a security vulnerability report.
+          required: true
+        - label: This proposal contains no private capability, credential, provider detail, account identifier, or raw log.
+          required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the user-visible problem without relying on a private provider or account.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Define the smallest observable behavior and its failure mode.
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Primary Bridge area
+      options:
+        - Pairing or profile management
+        - Provider import or gateway
+        - Playback source claims
+        - History or resume
+        - Trakt or TMDB
+        - Subtitles
+        - Storage or deployment
+        - Documentation or support
+    validations:
+      required: true
+  - type: textarea
+    id: privacy
+    attributes:
+      label: Privacy and security impact
+      description: State new data, recipients, retention, credentials, permissions, trust boundaries, and abuse cases. Write "None identified" only after considering each item.
+    validations:
+      required: true
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility and rollout
+      description: Identify Kodi, Stremio, provider, schema, migration, deployment, and coordinated-release effects.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include a no-change option and explain why filename, IP, or global fallback identity is not required.
+    validations:
+      required: false

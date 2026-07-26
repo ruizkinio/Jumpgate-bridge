@@ -1,0 +1,39 @@
+services:
+  - type: web
+    name: jumpgate-bridge
+    runtime: node
+    buildCommand: npm ci --omit=dev
+    startCommand: node index.js
+    healthCheckPath: /health/ready
+    envVars:
+      - key: PORT
+        value: 7515
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: PUBLIC_BASE_URL
+        sync: false
+      - key: JUMPGATE_TRUST_PROXY
+        value: 1
+      - key: CONFIG_SECRET
+        generateValue: true
+      - key: JUMPGATE_DURABLE_DRIVER
+        value: postgres
+      - key: JUMPGATE_TTL_DRIVER
+        value: redis
+      # Required deployment secrets are configured in Render, never in this file.
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: JUMPGATE_TOKEN_PEPPER
+        sync: false
+      - key: JUMPGATE_ENVELOPE_PRIMARY_KEY_ID
+        sync: false
+      - key: JUMPGATE_ENVELOPE_KEYRING
+        sync: false
+      - key: TRAKT_CLIENT_ID
+        sync: false
+      - key: TRAKT_CLIENT_SECRET
+        sync: false

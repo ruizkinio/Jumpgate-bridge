@@ -1,0 +1,39 @@
+FROM node:24-alpine@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd
+
+ARG JUMPGATE_BUILD_SHA=""
+RUN node -e 'const value=process.argv[1];if(value && !/^[a-f0-9]{40}$/.test(value))process.exit(1)' "$JUMPGATE_BUILD_SHA"
+
+ENV NODE_ENV=production
+ENV JUMPGATE_BUILD_SHA=$JUMPGATE_BUILD_SHA
+LABEL org.opencontainers.image.revision=$JUMPGATE_BUILD_SHA
+
+WORKDIR /app
+
+COPY package*.json .npmrc ./
+RUN apk add --no-cache --virtual .build-deps python3 make g++ \
+    && npm ci --omit=dev \
+    && npm cache clean --force \
+    && apk del .build-deps
+
+# Copy only runtime inputs so local env files and test fixtures cannot enter the image.
+COPY --chown=node:node index.js ./
+COPY --chown=node:node lib ./lib
+COPY --chown=node:node migrations ./migrations
+COPY --chown=node:node public ./public
+
+# scripts/ is excluded from the build context; expose the copied guarded CLI entrypoint.
+RUN mkdir -p /app/scripts \
+    && ln -s ../lib/storage/postgres/provider-mutation-activation.js \
+      /app/scripts/activate-provider-mutation-protocol.js \
+    && ln -s ../lib/storage/redis/playback-claim-writer-protocol.js \
+      /app/scripts/playback-claim-writer-protocol.js \
+    && ln -s ../lib/storage/production-release-protocols.js \
+      /app/scripts/production-release-protocols.js
+
+RUN mkdir -p /app/.data && chown node:node /app/.data
+
+USER node
+
+EXPOSE 7515
+
+CMD ["node", "index.js"]

@@ -1,0 +1,9 @@
+{
+  "fixtureVersion": 1,
+  "protocolVersion": 5,
+  "scriptName": "playbackClaim",
+  "sharedSource": "lib/storage/redis/scripts/playback-common.lua",
+  "scriptSource": "lib/storage/redis/scripts/playback-claim.lua",
+  "compositeRedisSha1": "08756b2da2cac2ad3ceffedd933163c915410bc1",
+  "policySha256": "db9551352441b68682762845d7a5e96b10a152da12fa0c1dd6537e1b6c1769f4"
+}

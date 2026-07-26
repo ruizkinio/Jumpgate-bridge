@@ -1,0 +1,613 @@
+{
+  "formatVersion": 1,
+  "algorithm": "source-fingerprint-v1",
+  "validCases": [
+    {
+      "id": "direct-signed-url-original",
+      "stream": {
+        "url": "https://cdn.example/video.mkv?token=a%2Bb&expires=7&part=1"
+      },
+      "exactUrl": "https://cdn.example/video.mkv?token=a%2Bb&expires=7&part=1",
+      "playbackUrl": "https://cdn.example/video.mkv?token=a%2Bb&expires=7&part=1",
+      "expected": [
+        "v1:url:sha256:ff51b857fdaf038312d56018146fafd001eed42375c1d23f5c4aab741247682c"
+      ],
+      "exactExpected": "v1:url:sha256:ff51b857fdaf038312d56018146fafd001eed42375c1d23f5c4aab741247682c"
+    },
+    {
+      "id": "direct-signed-url-query-reordered",
+      "stream": {
+        "url": "https://cdn.example/video.mkv?part=1&expires=7&token=a%2Bb"
+      },
+      "exactUrl": "https://cdn.example/video.mkv?part=1&expires=7&token=a%2Bb",
+      "playbackUrl": "https://cdn.example/video.mkv?part=1&expires=7&token=a%2Bb",
+      "expected": [
+        "v1:url:sha256:191c1b4cfdd6da479cb50e53045a0a1f28c044af1084c52cb161a8f737d0b5b7"
+      ],
+      "exactExpected": "v1:url:sha256:191c1b4cfdd6da479cb50e53045a0a1f28c044af1084c52cb161a8f737d0b5b7"
+    },
+    {
+      "id": "direct-signed-url-percent-decoded-plus",
+      "stream": {
+        "url": "https://cdn.example/video.mkv?token=a+b&expires=7&part=1"
+      },
+      "exactUrl": "https://cdn.example/video.mkv?token=a+b&expires=7&part=1",
+      "playbackUrl": "https://cdn.example/video.mkv?token=a+b&expires=7&part=1",
+      "expected": [
+        "v1:url:sha256:c74c340f9bd450db12a2e17737709ec7827cd6f0ebc260218667b94f93ad981b"
+      ],
+      "exactExpected": "v1:url:sha256:c74c340f9bd450db12a2e17737709ec7827cd6f0ebc260218667b94f93ad981b"
+    },
+    {
+      "id": "direct-https-fragment",
+      "stream": {
+        "url": "https://cdn.example/video.mkv?token=a%2Bb#chapter%2F1"
+      },
+      "exactUrl": "https://cdn.example/video.mkv?token=a%2Bb#chapter%2F1",
+      "playbackUrl": "https://cdn.example/video.mkv?token=a%2Bb#chapter%2F1",
+      "expected": [
+        "v1:url:sha256:7688e1f645e05dd8e3212ac18211980f8b6f7f9e0dcf3cd33039313092041ff2"
+      ],
+      "exactExpected": "v1:url:sha256:7688e1f645e05dd8e3212ac18211980f8b6f7f9e0dcf3cd33039313092041ff2"
+    },
+    {
+      "id": "direct-ftp-fragment",
+      "stream": {
+        "url": "ftp://fixture-user:fixture-pass@files.example/video%20one.mkv?token=a%2Bb#part-1"
+      },
+      "exactUrl": "ftp://fixture-user:fixture-pass@files.example/video%20one.mkv?token=a%2Bb#part-1",
+      "playbackUrl": "ftp://fixture-user:fixture-pass@files.example/video%20one.mkv?token=a%2Bb#part-1",
+      "expected": [
+        "v1:url:sha256:50b4f5dfc5c1e9cc33f2b716f8790bcf984f0d966ed76cb180bf40bea266b6ba"
+      ],
+      "exactExpected": "v1:url:sha256:50b4f5dfc5c1e9cc33f2b716f8790bcf984f0d966ed76cb180bf40bea266b6ba"
+    },
+    {
+      "id": "direct-ftps-fragment",
+      "stream": {
+        "url": "ftps://files.example:990/video.mkv?token=a+b#secure"
+      },
+      "exactUrl": "ftps://files.example:990/video.mkv?token=a+b#secure",
+      "playbackUrl": "ftps://files.example:990/video.mkv?token=a+b#secure",
+      "expected": [
+        "v1:url:sha256:b5129e3e1aadda5519f1c7560d15c164eeb6d5b37cdb30e88ce61509f4ca0e4a"
+      ],
+      "exactExpected": "v1:url:sha256:b5129e3e1aadda5519f1c7560d15c164eeb6d5b37cdb30e88ce61509f4ca0e4a"
+    },
+    {
+      "id": "direct-rtmp-fragment",
+      "stream": {
+        "url": "rtmp://stream.example:1935/app/live?token=a%2Bb#variant"
+      },
+      "exactUrl": "rtmp://stream.example:1935/app/live?token=a%2Bb#variant",
+      "playbackUrl": "rtmp://stream.example:1935/app/live?token=a%2Bb#variant",
+      "expected": [
+        "v1:url:sha256:aaeb5db4a1361ad1fb0a3a1bf747838f4377202d7c0e6d5eba177fbddf63374b"
+      ],
+      "exactExpected": "v1:url:sha256:aaeb5db4a1361ad1fb0a3a1bf747838f4377202d7c0e6d5eba177fbddf63374b"
+    },
+    {
+      "id": "torrent-selected-file-index",
+      "stream": {
+        "infoHash": "ABCDEF0123456789ABCDEF0123456789ABCDEF01",
+        "fileIdx": 42,
+        "fileMustInclude": [
+          "ignored-for-selected-file"
+        ]
+      },
+      "playbackUrl": "http://127.0.0.1:11470/abcdef0123456789abcdef0123456789abcdef01/42?tr=https%3A%2F%2Ftracker.example%2Fannounce&f=ignored-for-selected-file",
+      "expected": [
+        "v1:info-hash:abcdef0123456789abcdef0123456789abcdef01:file-idx:42"
+      ]
+    },
+    {
+      "id": "torrent-unselected-ordered-filters",
+      "stream": {
+        "infoHash": "ABCDEF0123456789ABCDEF0123456789ABCDEF01",
+        "fileMustInclude": [
+          "Season 02",
+          "episode-2-private.mkv"
+        ]
+      },
+      "playbackUrl": "http://127.0.0.1:11470/abcdef0123456789abcdef0123456789abcdef01/-1?tr=https%3A%2F%2Ftracker.example%2Fannounce&f=Season+02&f=episode-2-private.mkv",
+      "expected": [
+        "v1:info-hash:abcdef0123456789abcdef0123456789abcdef01:file-idx:-1:file-must-include:sha256:961288f086c5395ead942f38b814752a226dbb1b59ca6a7765d9cf056614d277"
+      ]
+    },
+    {
+      "id": "torrent-unselected-reversed-filters",
+      "stream": {
+        "infoHash": "ABCDEF0123456789ABCDEF0123456789ABCDEF01",
+        "fileIdx": "-1",
+        "fileMustInclude": [
+          "episode-2-private.mkv",
+          "Season 02"
+        ]
+      },
+      "playbackUrl": "http://127.0.0.1:11470/abcdef0123456789abcdef0123456789abcdef01/-1?f=episode-2-private.mkv&tr=https%3A%2F%2Ftracker.example%2Fannounce&f=Season+02",
+      "expected": [
+        "v1:info-hash:abcdef0123456789abcdef0123456789abcdef01:file-idx:-1:file-must-include:sha256:dd24ea069549b15ee838910f42f8296d9ed86315d5e1793b6b81db0a8f13b7b9"
+      ]
+    },
+    {
+      "id": "proxy-route-request-response-headers",
+      "stream": {
+        "url": "https://media.example/video%2Fpart.mkv?token=a%2Bb&expires=7",
+        "behaviorHints": {
+          "proxyHeaders": {
+            "request": {
+              "Authorization": "Bearer fixture+token",
+              "Range": "bytes=0-",
+              "Z-Last": "z",
+              "a-first": "a",
+              "X_Trace": "trace"
+            },
+            "response": {
+              "Content-Type": "video/mp4"
+            }
+          }
+        }
+      },
+      "playbackUrl": "http://127.0.0.1:11470/proxy/d=https%3A%2F%2Fmedia.example&h=Authorization%3ABearer+fixture%2Btoken&h=Range%3Abytes%3D0-&h=Z-Last%3Az&h=a-first%3Aa&h=X_Trace%3Atrace&r=Content-Type%3Avideo%2Fmp4/video%2Fpart.mkv?token=a%2Bb&expires=7",
+      "expected": [
+        "v1:url:sha256:d7b47f4095294073fbcf8824d768b3bea6a1ad730386b15286d462e4ecd1d0b1",
+        "v1:proxy-source:sha256:9170ba31c5344bf83f05113d7ac97bd2af1f08f3fd2dc7e3c2fda4eb8c5b92e7"
+      ]
+    },
+    {
+      "id": "archive-zip-create-route",
+      "stream": {
+        "zipUrls": [
+          [
+            "https://archive.example/part%201.zip?sig=a%2Bb",
+            123456
+          ],
+          [
+            "https://archive.example/part%202.zip"
+          ]
+        ],
+        "fileIdx": "2",
+        "fileMustInclude": [
+          "Episode 02",
+          "\\.mkv$"
+        ]
+      },
+      "playbackUrl": "http://127.0.0.1:11470/zip/create?lz=N4IgrgTgNgziBcBtRIAWAXdAHG8D0eAhhAMaoCWAbgKYB01AHoQLZZTV5bHoCkATAAYAjLQBe5LAH4Y5AOYBeQvwBCAIxAAaIXwDMAFgCsANgC6GlBmy4CxMlTqMWbDlwi9BfMRJAmzIAGbk7ACSACYMCHwaAUHUALJgMOjBAHYkUGCh1AgoAKJY5DAA9lkABAJ8miAAOtW0zADWlAAkPgC%2BQA",
+      "expected": [
+        "v1:archive-zip:sha256:9369b4a5dcb1c2029f2df57ae9bdc8f67a899bc3533f546a90ba57f658b19d59"
+      ]
+    },
+    {
+      "id": "archive-rar-create-route",
+      "stream": {
+        "rarUrls": [
+          [
+            "https://archive.example/part1.rar?token=x%2Fy",
+            10
+          ],
+          [
+            "https://archive.example/part2.rar",
+            20
+          ]
+        ],
+        "fileMustInclude": [
+          "S01E03"
+        ]
+      },
+      "playbackUrl": "http://127.0.0.1:11470/rar/create?lz=N4IgrgTgNgziBcBtRIAWAXdAHG8D0eAhhAMaoCWAbgKYB01AHoQLZZTV5bHoCMtExAPzoA9gGtqAOwC8DAKQAmAGIBPEABoeABgC66lBmy4CxMlTqMWbDlwjoF-YhoW69IAGbl2AWTAx0AJKSJFBgACbUCCgAylo8AKJaAMwgOgC%2BQA",
+      "expected": [
+        "v1:archive-rar:sha256:259b7897b9440a004c30a63fe0d38b18df73218bcea1a114509d2c308e7970de"
+      ]
+    },
+    {
+      "id": "nzb-create-route",
+      "stream": {
+        "nzbUrl": "https://usenet.example/item.nzb?key=a%2Bb",
+        "nzbUrls": [
+          "https://backup.example/item.nzb?key=b%2Fc"
+        ],
+        "servers": [
+          "nntps://fixture-user:fixture-pass@news.example:563/4"
+        ]
+      },
+      "playbackUrl": "http://127.0.0.1:11470/nzb/create?lz=N4IgdgXgRgqgTgGxALhACwC4YA4GdkD0BArrgKZhkYB0ZAHgIYC22CZBAlhmU9ZFAH4A1mQCeAXgYBSAEwAhKCAA04aPAS4UAbXRY8hAlAYBjIcWy1GLNp269%2BwseKiyAYsZABdFeTgA3MjhNZB0wMBx8IgAzDjoMYjgyAFpSQOQYuITk7AZcXAABSgB3XEtmVjJkAFYANgBmAgAWLwBfIA",
+      "expected": [
+        "v1:nzb-source:sha256:2262de818b78e4cbd4560cc11c90cb6eb4d0dfa2551a5a05d10897167bdd5c43"
+      ]
+    },
+    {
+      "id": "nzb-create-route-selected-file",
+      "stream": {
+        "nzbUrl": "https://usenet.example/item.nzb?key=a%2Bb",
+        "nzbUrls": [
+          "https://backup.example/item.nzb?key=b%2Fc"
+        ],
+        "servers": [
+          "nntps://fixture-user:fixture-pass@news.example:563/4"
+        ],
+        "fileIdx": "3",
+        "fileMustInclude": [
+          "Episode 03"
+        ]
+      },
+      "playbackUrl": "http://127.0.0.1:11470/nzb/create?lz=N4IgdgXgRgqgTgGxALhACwC4YA4GdkD0BArrgKZhkYB0ZAHgIYC22CZBAlhmU9ZFAH4A1mQCeAXgYBSAEwAhKCAA04aPAS4UAbXRY8hAlAYBjIcWy1GLNp269%2BwseKiyAYsZABdFeTgA3MjhNZB0wMBx8IgAzDjoMYjgyAFpSQOQYuITk7AZcXAABSgB3XEtmVjJkAFYANgBmAgAWLxUYtgBJABM6FDrWjjYAWVIMdrBjBGJOsm0QAFFsDlwAe2mAAgAGOq8AXyA",
+      "expected": [
+        "v1:nzb-source:sha256:566e534bbf63a27c90bec34572e0a8a34df12712a1b00d50ef604605807297a9"
+      ]
+    },
+    {
+      "id": "nzb-create-route-ordered-filters",
+      "stream": {
+        "nzbUrl": "https://usenet.example/item.nzb?key=a%2Bb",
+        "nzbUrls": [
+          "https://backup.example/item.nzb?key=b%2Fc"
+        ],
+        "servers": [
+          "nntps://fixture-user:fixture-pass@news.example:563/4"
+        ],
+        "fileIdx": -1,
+        "fileMustInclude": [
+          "Season 02",
+          "episode-private.mkv"
+        ]
+      },
+      "playbackUrl": "http://127.0.0.1:11470/nzb/create?lz=N4IgdgXgRgqgTgGxALhACwC4YA4GdkD0BArrgKZhkYB0ZAHgIYC22CZBAlhmU9ZFAH4A1mQCeAXgYBSAEwAhKCAA04aPAS4UAbXRY8hAlAYBjIcWy1GLNp269%2BwseKiyAYsZABdFeTgA3MjhNZB0wMBx8IgAzDjoMYjgyAFpSQOQYuITk7AZcXAABSgB3XEtmVjJkAFYANgBmAgAWLxUYtgBJABM6FCSARlaONgBZUgx2sGMEYk6ybRAAZTJcgHswAAIABhllEDJsDlwV2aTsOA4-Bm5qJiE-LwBfIA",
+      "expected": [
+        "v1:nzb-source:sha256:1dc7f03d30c0c3b043b018a3d02f93edaae3e46a55c9f68e65aff540f3212a5c"
+      ]
+    },
+    {
+      "id": "nzb-create-route-reversed-filters",
+      "stream": {
+        "nzbUrl": "https://usenet.example/item.nzb?key=a%2Bb",
+        "nzbUrls": [
+          "https://backup.example/item.nzb?key=b%2Fc"
+        ],
+        "servers": [
+          "nntps://fixture-user:fixture-pass@news.example:563/4"
+        ],
+        "fileIdx": "-1",
+        "fileMustInclude": [
+          "episode-private.mkv",
+          "Season 02"
+        ]
+      },
+      "playbackUrl": "http://127.0.0.1:11470/nzb/create?lz=N4IgdgXgRgqgTgGxALhACwC4YA4GdkD0BArrgKZhkYB0ZAHgIYC22CZBAlhmU9ZFAH4A1mQCeAXgYBSAEwAhKCAA04aPAS4UAbXRY8hAlAYBjIcWy1GLNp269%2BwseKiyAYsZABdFeTgA3MjhNZB0wMBx8IgAzDjoMYjgyAFpSQOQYuITk7AZcXAABSgB3XEtmVjJkAFYANgBmAgAWLxUYtgBJABM6FCSARlaONgBZUgx2sGMEYk6ybRAybA5cAHtZpOw4Dj8GbmomIT9lEABlMlyVsAACAAYZLwBfIA",
+      "expected": [
+        "v1:nzb-source:sha256:d403f22a8de23df96693628e24263a5b66fa2dd13c26f979f7431cfe85563e3c"
+      ]
+    },
+    {
+      "id": "youtube-source",
+      "stream": {
+        "ytId": "dQw4w9WgXcQ"
+      },
+      "playbackUrl": "http://127.0.0.1:11470/yt/dQw4w9WgXcQ",
+      "expected": [
+        "v1:yt-id:sha256:5f6b0b4e201f2a7e66927abb5cadeec81624dcc8efe6644b78aa182213f653a2"
+      ]
+    },
+    {
+      "id": "external-platform-variants",
+      "stream": {
+        "externalUrl": "https://player.example/watch?id=a%2Bb",
+        "androidTvUrl": "intent://player.example/watch#Intent;scheme=https;end",
+        "tizenUrl": "tizen://fixture-player?asset=7",
+        "webosUrl": "webos://fixture-player?asset=7"
+      },
+      "expected": [
+        "v1:external-url:sha256:27b486370402e9125247965e921d4dcc1d602c5f2aae7a625223605180c1df1a",
+        "v1:android-tv-url:sha256:f6e10849b299b5fa556540c39972537ad786d5f0bcb52c0e2d9d133e78a679a3",
+        "v1:tizen-url:sha256:b7556cbf9c448742d479a4973c9ee5a090ae7d449eab6a522306529350d14647",
+        "v1:webos-url:sha256:1a88bf6e33aaa71c06f240f88b31f32655c102bc7938564abc02ab3c65afacb9"
+      ]
+    },
+    {
+      "id": "player-frame-source",
+      "stream": {
+        "playerFrameUrl": "https://frame.example/embed?token=a%2Bb"
+      },
+      "expected": [
+        "v1:player-frame-url:sha256:67d804f96b6e2319970c5f6845f7c456541c7e585aa24a91d00bc4af366190f5"
+      ]
+    },
+    {
+      "id": "remote-loopback-name-lookalike",
+      "stream": {
+        "url": "http://127.example:11470/unknown/source?token=a%2Bb"
+      },
+      "exactUrl": "http://127.example:11470/unknown/source?token=a%2Bb",
+      "playbackUrl": "http://127.example:11470/unknown/source?token=a%2Bb",
+      "expected": [
+        "v1:url:sha256:e7e288e406917ae6772cff060cbdeb6a45452d6fb310e857f2cf994fd96c8f8c"
+      ],
+      "exactExpected": "v1:url:sha256:e7e288e406917ae6772cff060cbdeb6a45452d6fb310e857f2cf994fd96c8f8c"
+    },
+    {
+      "id": "remote-loopback-ipv6-lookalike",
+      "stream": {
+        "url": "http://[2001:db8::127.0.0.1]:11470/unknown/source?token=a+b"
+      },
+      "exactUrl": "http://[2001:db8::127.0.0.1]:11470/unknown/source?token=a+b",
+      "playbackUrl": "http://[2001:db8::127.0.0.1]:11470/unknown/source?token=a+b",
+      "expected": [
+        "v1:url:sha256:a1814775e828504cd71117d25f83731d960f6cd5ae7ddb142926c9c6d65ff1a1"
+      ],
+      "exactExpected": "v1:url:sha256:a1814775e828504cd71117d25f83731d960f6cd5ae7ddb142926c9c6d65ff1a1"
+    },
+    {
+      "id": "torrent-canonical-extra-grammar",
+      "stream": {},
+      "extraFingerprints": [
+        "v1:info-hash:abcdef0123456789abcdef0123456789abcdef01:file-idx:-1:file-must-include:sha256:3b096b40e55c46ee7a47c6ab6c73058daedf4fc384c52b434a96bd5951e8061e",
+        "v1:info-hash:abcdef0123456789abcdef0123456789abcdef01:file-idx:4:file-must-include:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      ],
+      "expected": [
+        "v1:info-hash:abcdef0123456789abcdef0123456789abcdef01:file-idx:-1:file-must-include:sha256:3b096b40e55c46ee7a47c6ab6c73058daedf4fc384c52b434a96bd5951e8061e",
+        "v1:opaque:sha256:41304dcf600a3f2e2f58d503395e1695646840773b12f39987fd1f66792ef000"
+      ]
+    },
+    {
+      "id": "loopback-localhost-route",
+      "stream": {
+        "ytId": "dQw4w9WgXcQ"
+      },
+      "playbackUrl": "http://localhost:11470/yt/dQw4w9WgXcQ",
+      "expected": [
+        "v1:yt-id:sha256:5f6b0b4e201f2a7e66927abb5cadeec81624dcc8efe6644b78aa182213f653a2"
+      ]
+    },
+    {
+      "id": "loopback-ipv4-127-8-route",
+      "stream": {
+        "ytId": "dQw4w9WgXcQ"
+      },
+      "playbackUrl": "http://127.0.0.2:11470/yt/dQw4w9WgXcQ",
+      "expected": [
+        "v1:yt-id:sha256:5f6b0b4e201f2a7e66927abb5cadeec81624dcc8efe6644b78aa182213f653a2"
+      ]
+    },
+    {
+      "id": "loopback-ipv4-trailing-dot-route",
+      "stream": {
+        "ytId": "dQw4w9WgXcQ"
+      },
+      "playbackUrl": "http://127.0.0.1.:11470/yt/dQw4w9WgXcQ",
+      "expected": [
+        "v1:yt-id:sha256:5f6b0b4e201f2a7e66927abb5cadeec81624dcc8efe6644b78aa182213f653a2"
+      ]
+    },
+    {
+      "id": "loopback-ipv6-compressed-route",
+      "stream": {
+        "ytId": "dQw4w9WgXcQ"
+      },
+      "playbackUrl": "http://[::1]:11470/yt/dQw4w9WgXcQ",
+      "expected": [
+        "v1:yt-id:sha256:5f6b0b4e201f2a7e66927abb5cadeec81624dcc8efe6644b78aa182213f653a2"
+      ]
+    },
+    {
+      "id": "loopback-ipv6-expanded-route",
+      "stream": {
+        "ytId": "dQw4w9WgXcQ"
+      },
+      "playbackUrl": "http://[0:0:0:0:0:0:0:1]:11470/yt/dQw4w9WgXcQ",
+      "expected": [
+        "v1:yt-id:sha256:5f6b0b4e201f2a7e66927abb5cadeec81624dcc8efe6644b78aa182213f653a2"
+      ]
+    },
+    {
+      "id": "loopback-ipv4-mapped-route",
+      "stream": {
+        "ytId": "dQw4w9WgXcQ"
+      },
+      "playbackUrl": "http://[::ffff:127.0.0.1]:11470/yt/dQw4w9WgXcQ",
+      "expected": [
+        "v1:yt-id:sha256:5f6b0b4e201f2a7e66927abb5cadeec81624dcc8efe6644b78aa182213f653a2"
+      ]
+    },
+    {
+      "id": "loopback-ipv4-compatible-route",
+      "stream": {
+        "ytId": "dQw4w9WgXcQ"
+      },
+      "playbackUrl": "http://[::127.0.0.1]:11470/yt/dQw4w9WgXcQ",
+      "expected": [
+        "v1:yt-id:sha256:5f6b0b4e201f2a7e66927abb5cadeec81624dcc8efe6644b78aa182213f653a2"
+      ]
+    }
+  ],
+  "invalidStreams": [
+    {
+      "id": "zero-fingerprint-empty-stream",
+      "stream": {}
+    },
+    {
+      "id": "zero-fingerprint-selector-only-stream",
+      "stream": {
+        "fileMustInclude": [
+          "Episode 03"
+        ]
+      }
+    },
+    {
+      "id": "url-control-character",
+      "stream": {
+        "url": "https://media.example/video\nsecret"
+      }
+    },
+    {
+      "id": "invalid-info-hash-length",
+      "stream": {
+        "infoHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "fileIdx": 1
+      }
+    },
+    {
+      "id": "file-index-out-of-range",
+      "stream": {
+        "infoHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "fileIdx": 65536
+      }
+    },
+    {
+      "id": "orphan-file-index",
+      "stream": {
+        "fileIdx": 1
+      }
+    },
+    {
+      "id": "torrent-filters-not-array",
+      "stream": {
+        "infoHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "fileMustInclude": {
+          "f": "episode.mkv"
+        }
+      }
+    },
+    {
+      "id": "empty-rar-source",
+      "stream": {
+        "rarUrls": []
+      }
+    },
+    {
+      "id": "empty-nzb-servers",
+      "stream": {
+        "nzbUrl": "https://usenet.example/item.nzb",
+        "servers": []
+      }
+    },
+    {
+      "id": "proxy-header-control-character",
+      "stream": {
+        "url": "https://media.example/video.mkv",
+        "behaviorHints": {
+          "proxyHeaders": {
+            "request": {
+              "Authorization": "Bearer fixture\nsecret"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "proxy-case-insensitive-duplicate-header",
+      "stream": {
+        "url": "https://media.example/video.mkv",
+        "behaviorHints": {
+          "proxyHeaders": {
+            "request": {
+              "Authorization": "first",
+              "authorization": "second"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "proxy-invalid-header-token",
+      "stream": {
+        "url": "https://media.example/video.mkv",
+        "behaviorHints": {
+          "proxyHeaders": {
+            "request": {
+              "Bad Header": "value"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "invalidPlaybackUrls": [
+    {
+      "id": "empty-playback-url",
+      "playbackUrl": ""
+    },
+    {
+      "id": "malformed-playback-url",
+      "playbackUrl": "not a url"
+    },
+    {
+      "id": "unknown-loopback-route",
+      "playbackUrl": "http://127.0.0.1:11470/unknown/source"
+    },
+    {
+      "id": "proxy-malformed-percent-encoding",
+      "playbackUrl": "http://127.0.0.1:11470/proxy/d=https%3A%2F%2Fmedia.example&h=Range%ZZbytes/video.mkv"
+    },
+    {
+      "id": "proxy-missing-origin",
+      "playbackUrl": "http://127.0.0.1:11470/proxy/h=Range%3Abytes%3D0-/video.mkv"
+    },
+    {
+      "id": "torrent-invalid-hash",
+      "playbackUrl": "http://127.0.0.1:11470/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/1"
+    },
+    {
+      "id": "torrent-index-out-of-range",
+      "playbackUrl": "http://127.0.0.1:11470/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/65536"
+    },
+    {
+      "id": "torrent-malformed-filter",
+      "playbackUrl": "http://127.0.0.1:11470/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/-1?f=%ZZ"
+    },
+    {
+      "id": "create-invalid-lz",
+      "playbackUrl": "http://127.0.0.1:11470/zip/create?lz=not-valid-lz"
+    },
+    {
+      "id": "nzb-create-zero-fingerprint-empty-payload",
+      "playbackUrl": "http://127.0.0.1:11470/nzb/create?lz=N4XyA"
+    },
+    {
+      "id": "nzb-create-zero-fingerprint-selector-only-payload",
+      "playbackUrl": "http://127.0.0.1:11470/nzb/create?lz=N4IgZglgNgpgsgVwM4BcCSA7AxlBATGEALgG0QBRABwiQHsCACABgGYQBdAXyA"
+    },
+    {
+      "id": "loopback-wrong-port",
+      "playbackUrl": "http://127.0.0.1:11471/yt/dQw4w9WgXcQ"
+    },
+    {
+      "id": "loopback-missing-port",
+      "playbackUrl": "http://127.0.0.1/yt/dQw4w9WgXcQ"
+    },
+    {
+      "id": "loopback-https-scheme",
+      "playbackUrl": "https://127.0.0.1:11470/yt/dQw4w9WgXcQ"
+    },
+    {
+      "id": "loopback-user-info",
+      "playbackUrl": "http://user@127.0.0.1:11470/yt/dQw4w9WgXcQ"
+    },
+    {
+      "id": "loopback-fragment",
+      "playbackUrl": "http://127.0.0.1:11470/yt/dQw4w9WgXcQ#fragment"
+    },
+    {
+      "id": "loopback-ipv4-shorthand-lookalike",
+      "playbackUrl": "http://127.1:11470/yt/dQw4w9WgXcQ"
+    },
+    {
+      "id": "loopback-ipv4-octal-lookalike",
+      "playbackUrl": "http://0177.0.0.1:11470/yt/dQw4w9WgXcQ"
+    },
+    {
+      "id": "loopback-ipv4-hex-lookalike",
+      "playbackUrl": "http://0x7f000001:11470/yt/dQw4w9WgXcQ"
+    },
+    {
+      "id": "loopback-malformed-ipv6-lookalike",
+      "playbackUrl": "http://[::ffff:127.0.0.1.example]:11470/yt/dQw4w9WgXcQ"
+    },
+    {
+      "id": "proxy-case-insensitive-duplicate-route-header",
+      "playbackUrl": "http://127.0.0.1:11470/proxy/d=https%3A%2F%2Fmedia.example&h=Authorization%3Afirst&h=authorization%3Asecond/video.mkv"
+    },
+    {
+      "id": "proxy-invalid-route-header-token",
+      "playbackUrl": "http://127.0.0.1:11470/proxy/d=https%3A%2F%2Fmedia.example&h=Bad+Header%3Avalue/video.mkv"
+    }
+  ]
+}

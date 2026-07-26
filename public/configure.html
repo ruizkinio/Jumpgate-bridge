@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#11171d">
+  <title>Jumpgate Bridge Configure</title>
+  <link rel="stylesheet" href="/assets/configure.css?v=@@JUMPGATE_ASSET_REVISION@@">
+</head>
+<body>
+  <div class="scene" aria-hidden="true">
+    <div class="scene-gate"></div>
+    <div class="scene-noise"></div>
+  </div>
+
+  <main class="shell">
+    <header class="identity-blade">
+      <div class="identity-lockup">
+        <img class="brand-mark" src="/assets/jumpgate-mark.svg" alt="">
+        <div class="identity-copy">
+          <span class="brand-kicker">Kodi media route</span>
+          <span class="brand-name">Jumpgate</span>
+          <span class="brand-subtitle">Bridge setup</span>
+        </div>
+      </div>
+      <div class="route-readout" aria-label="Connection path from Stremio to Kodi">
+        <span>Stremio</span><span class="route-vector" aria-hidden="true">&rarr;</span><span>Kodi</span>
+      </div>
+    </header>
+
+    <nav class="stage-rail" aria-labelledby="progressHeading">
+      <p id="progressHeading" class="rail-heading">Setup path</p>
+      <ol class="steps" aria-label="Configuration progress">
+        <li id="stepGenerate" class="@@JUMPGATE_GENERATE_STEP_CLASS@@">
+          <span class="step-index">01</span>
+          <span class="step-copy"><strong>Profile</strong><small>Trakt and playback preferences</small></span>
+        </li>
+        <li id="stepPair" class="locked">
+          <span class="step-index">02</span>
+          <span class="step-copy"><strong>Pair</strong><small>Bind this Jumpgate device</small></span>
+        </li>
+        <li id="stepProviders" class="locked">
+          <span class="step-index">03</span>
+          <span class="step-copy"><strong>Providers</strong><small>Read the active Stremio profile</small></span>
+        </li>
+        <li id="stepInstall" class="locked">
+          <span class="step-index">04</span>
+          <span class="step-copy"><strong>Install</strong><small>Open the Stremio prompt</small></span>
+        </li>
+      </ol>
+      <div class="rail-privacy">
+        <span class="signal-dot" aria-hidden="true"></span>
+        <span>Private, profile-specific route</span>
+      </div>
+    </nav>
+
+    <div class="workspace">
+      <header class="hero title-plate">
+        <p class="eyebrow">External playback handoff</p>
+        <h1 aria-label="Route Stremio through Jumpgate">
+          <span class="hero-lead" aria-hidden="true">Route Stremio through</span>
+          <span class="hero-word" aria-hidden="true">JUMPGATE</span>
+        </h1>
+        <p class="hero-copy">Pair one Jumpgate profile, choose its media providers, then install the matching private addon in Stremio.</p>
+        <div class="signal-strip" aria-label="Bridge capabilities">
+          <span><b aria-hidden="true">01</b>Streams</span>
+          <span><b aria-hidden="true">02</b>Subtitles</span>
+          <span><b aria-hidden="true">03</b>History</span>
+          <span><b aria-hidden="true">04</b>Trakt</span>
+        </div>
+      </header>
+
+      @@JUMPGATE_NOTICE@@
+      @@JUMPGATE_ERROR@@
+
+      <section class="setup-panel" aria-labelledby="configuredHeading">
+        <div class="section-heading">
+          <div>
+            <p class="section-kicker">Stage 01</p>
+            <h2 id="configuredHeading">Create the playback profile</h2>
+          </div>
+          <span class="section-state">Local setup</span>
+        </div>
+
+        <div class="notice-row" role="note">
+          <span class="notice-icon" aria-hidden="true">i</span>
+          <p>Installation remains locked until Jumpgate is paired and provider import succeeds.</p>
+        </div>
+
+        <div class="field-grid">
+          <div class="field-group field-wide">
+            <label for="name">Profile name <span class="optional">Optional</span></label>
+            <input id="name" maxlength="64" autocomplete="off" value="@@JUMPGATE_NAME@@" placeholder="Living Room">
+          </div>
+        </div>
+
+        <details class="option-drawer">
+          <summary>Playback options <span>TMDB and subtitles</span></summary>
+          <div class="drawer-content">
+            <div class="notice-row caution" role="note">
+              <span class="notice-icon" aria-hidden="true">!</span>
+              <p>A TMDB key is stored inside the encrypted profile URL. Treat that URL as private.</p>
+            </div>
+            <div class="field-grid">
+              <div class="field-group field-wide">
+                <label for="tmdbKey">TMDB v3 API key <span class="optional">Optional</span></label>
+                <input id="tmdbKey" maxlength="64" autocomplete="off" placeholder="32-character TMDB API key">
+                <p class="small">@@JUMPGATE_TMDB_STATUS@@</p>
+              </div>
+              <label class="toggle-row field-wide" for="subtitlesEnabled">
+                <input id="subtitlesEnabled" type="checkbox"@@JUMPGATE_SUBTITLES_CHECKED@@>
+                <span class="toggle-control" aria-hidden="true"></span>
+                <span><strong>OpenSubtitles auto-download</strong><small>Enable automatic subtitle lookup in Jumpgate.</small></span>
+              </label>
+              <div class="field-group field-wide">
+                <label for="subtitleLanguages">Subtitle languages</label>
+                <input id="subtitleLanguages" maxlength="64" value="@@JUMPGATE_SUBTITLE_LANGUAGES@@" placeholder="en,es,pt-br">
+                <p class="small">These preferences are written only to the paired Jumpgate profile.</p>
+              </div>
+            </div>
+          </div>
+        </details>
+
+        <div class="primary-action-row">
+          <button id="connectTraktBtn" class="a trakt-action" type="button" aria-label="Connect account with Trakt to sync scrobbles and watched history">
+            <span class="trakt-brand-panel" aria-hidden="true">
+              <img class="trakt-lockup" src="/assets/trakt-lockup-negative.svg" alt="">
+            </span>
+            <span class="trakt-action-copy" aria-hidden="true">
+              <strong>Connect account</strong>
+              <small>Scrobbles + history</small>
+            </span>
+            <span class="trakt-arrow" aria-hidden="true"></span>
+          </button>
+        </div>
+        <div class="alternate-path">
+          <label class="consent" for="skipTraktAcknowledge">
+            <input id="skipTraktAcknowledge" type="checkbox">
+            <span>Continue without Trakt history sync</span>
+          </label>
+          <button id="skipTraktBtn" class="b compact" type="button" disabled>Generate without Trakt</button>
+        </div>
+
+        <div id="result" class="result hidden">
+          <input id="configBlob" type="hidden">
+
+          <section class="stage-block" aria-labelledby="pairStageHeading">
+            <div class="stage-header">
+              <span class="stage-number">02</span>
+              <div><p class="section-kicker">Device link</p><h3 id="pairStageHeading">Pair Jumpgate</h3></div>
+            </div>
+            <p class="stage-description">Open Jumpgate on the playback device and enter its short-lived code here.</p>
+            <div class="pair-entry">
+              <div class="field-group">
+                <label for="pairCode">Pair code</label>
+                <input id="pairCode" maxlength="32" autocomplete="one-time-code" inputmode="text" aria-describedby="pairHint" placeholder="ABCD-EFGH">
+              </div>
+              <button id="pairBtn" class="a" type="button">Pair device</button>
+            </div>
+            <p id="pairHint" class="small">Both <code>ABCD-EFGH</code> and <code>ABCDEFGH</code> are accepted. This tab retains a one-time activation retry token for up to 10 minutes; management credentials are never stored in browser storage.</p>
+            <div id="pairStatus" class="status-line" role="status" aria-live="polite" aria-atomic="true"></div>
+            <div id="pairTimer" class="small"></div>
+          </section>
+
+          <section id="stremioImport" class="stage-block" aria-labelledby="stremioHeading">
+            <div class="stage-header">
+              <span class="stage-number">03</span>
+              <div><p class="section-kicker">Read-only account link</p><h3 id="stremioHeading">Choose Stremio providers</h3></div>
+            </div>
+            <p class="stage-description">Jumpgate reads the addon collection once from the profile active during approval. It never receives the approval credential and does not change your Stremio addons.</p>
+            <div class="profile-note" role="note">Approve with the profile you want to configure, then keep that same profile active for installation.</div>
+            <div class="actions">
+              <button id="connectStremioBtn" class="a" type="button" disabled>Read active Stremio profile</button>
+              <button id="cancelStremioBtn" class="b hidden" type="button">Cancel</button>
+            </div>
+
+            <div id="stremioLink" class="approval-view hidden" aria-labelledby="approvalHeading">
+              <div class="approval-qr"><img id="stremioQr" alt="QR code for Stremio device-link approval"></div>
+              <div class="approval-copy">
+                <p class="section-kicker">Waiting for approval</p>
+                <h4 id="approvalHeading">Scan with your phone or open Stremio</h4>
+                <div class="approval-code"><span>Code</span><code id="stremioCode"></code></div>
+                <a id="stremioApprovalLink" class="text-link" target="_blank" rel="noopener noreferrer">Open Stremio approval</a>
+                <div id="stremioTimer" class="small"></div>
+              </div>
+            </div>
+
+            <div id="stremioStatus" class="status-line" role="status" aria-live="polite" aria-atomic="true"></div>
+            <div id="providerPreview" class="provider-preview hidden" aria-labelledby="providerHeading">
+              <div class="subsection-heading">
+                <div><p class="section-kicker">Gateway selection</p><h4 id="providerHeading">Providers available to Jumpgate</h4></div>
+                <span>Maximum 64</span>
+              </div>
+              <p class="small">Selected descriptors are backed up and imported only into this paired profile. Your Stremio account is not changed.</p>
+              <div id="providerList" class="provider-list" role="group" aria-labelledby="providerHeading"></div>
+              <div class="actions">
+                <button id="confirmProvidersBtn" class="a" type="button">Import selected providers</button>
+                <button id="cancelProvidersBtn" class="b" type="button">Cancel</button>
+              </div>
+            </div>
+
+            <details class="option-drawer manual-drawer">
+              <summary>Manual descriptor import <span>Advanced recovery</span></summary>
+              <div class="drawer-content">
+                <p id="manualHint" class="small">Paste an addon collection or descriptor array. Never paste an account key or password.</p>
+                <div class="field-group">
+                  <label for="manualDescriptors">Addon descriptor JSON</label>
+                  <textarea id="manualDescriptors" spellcheck="false" aria-describedby="manualHint" placeholder='{"addons":[...]}'></textarea>
+                </div>
+                <button id="previewManualBtn" class="b" type="button" disabled>Preview manual JSON</button>
+              </div>
+            </details>
+          </section>
+
+          <section class="stage-block install-stage" aria-labelledby="installStageHeading">
+            <div class="stage-header">
+              <span class="stage-number">04</span>
+              <div><p class="section-kicker">Final handoff</p><h3 id="installStageHeading">Install in Stremio</h3></div>
+            </div>
+            <p id="installPrivacy" class="stage-description" role="note">Keep the Stremio profile used for approval active. These private install links are revealed only after provider import; do not share them or apply them across profiles.</p>
+            <div id="installMaterial" class="install-material hidden">
+              <div class="field-group">
+                <label for="install">Stremio app link <span class="optional">stremio://</span></label>
+                <input id="install" readonly disabled aria-describedby="installPrivacy">
+              </div>
+              <button id="copyInstallBtn" class="b compact" type="button" data-copy="install" disabled>Copy Stremio link</button>
+              <div class="field-group">
+                <label for="installManifest">HTTPS manifest URL <span class="optional">manual install</span></label>
+                <input id="installManifest" readonly disabled aria-describedby="installPrivacy">
+              </div>
+              <button id="copyManifestBtn" class="b compact" type="button" data-copy="installManifest" disabled>Copy HTTPS manifest</button>
+            </div>
+            <button id="installConfiguredBtn" class="a install-button" type="button" disabled>Open Stremio install prompt</button>
+            <div id="meta" class="small"></div>
+          </section>
+
+          <section id="profileManagement" class="stage-block management-panel hidden" aria-labelledby="managementHeading" aria-busy="false">
+            <div class="stage-header management-header">
+              <span class="stage-number" aria-hidden="true">M</span>
+              <div><p class="section-kicker">Paired profile</p><h3 id="managementHeading">Manage this Bridge profile</h3></div>
+            </div>
+            <p class="stage-description">These controls use the authenticated management session created by pairing. No profile identifier or bearer credential is shown.</p>
+            <div id="managementStatus" class="status-line" role="status" aria-live="polite" aria-atomic="true"></div>
+
+            <section class="management-section" aria-labelledby="devicesHeading">
+              <div class="management-title-row">
+                <div><p class="section-kicker">Device access</p><h4 id="devicesHeading">Paired devices</h4></div>
+                <button id="refreshDevicesBtn" class="b compact" type="button" data-management-action>Refresh devices</button>
+              </div>
+              <p id="deviceRevocationNote" class="small">Revoking a device revokes its Bridge bearer credential. It does not revoke already-issued links or tokens.</p>
+              <div id="deviceList" class="device-list" role="list" aria-labelledby="devicesHeading" aria-describedby="deviceRevocationNote"></div>
+            </section>
+
+            <div class="management-grid">
+              <section class="management-card" aria-labelledby="historyHeading">
+                <p class="section-kicker">Local activity</p>
+                <h4 id="historyHeading">Bridge history</h4>
+                <p>Clearing history removes current Bridge history. Future playback creates new entries.</p>
+                <button id="clearHistoryBtn" class="b compact" type="button" data-management-action>Clear Bridge history</button>
+              </section>
+
+              <section class="management-card" aria-labelledby="traktManagementHeading">
+                <p class="section-kicker">Cloud sync</p>
+                <h4 id="traktManagementHeading">Trakt connection</h4>
+                <p>Disconnecting Trakt does not delete history already stored by Trakt.</p>
+                <p id="traktManagementState" class="management-state">Connection status unavailable</p>
+                <div class="actions compact-actions">
+                  <button id="reconnectTraktBtn" class="b compact" type="button" data-management-action>Connect Trakt</button>
+                  <button id="disconnectTraktBtn" class="b compact" type="button" data-management-action>Disconnect Trakt</button>
+                </div>
+              </section>
+            </div>
+
+            <section class="danger-zone" aria-labelledby="deleteProfileHeading">
+              <div>
+                <p class="section-kicker">Destructive action</p>
+                <h4 id="deleteProfileHeading">Delete Bridge profile</h4>
+                <p>Profile deletion is destructive and may finish asynchronously. Pairing, provider access, private install controls, and current Bridge data will no longer be available.</p>
+              </div>
+              <button id="openDeleteProfileBtn" class="danger-button" type="button" data-management-action>Delete profile</button>
+            </section>
+          </section>
+
+          <details id="technicalDetails" class="technical-drawer hidden">
+            <summary>Technical connection details <span>Manual recovery only</span></summary>
+            <div class="drawer-content technical-grid">
+              <p id="technicalPrivacy" class="small field-wide">Recovery addresses contain the same private profile capability. Do not share them.</p>
+              <div class="field-group"><label for="bridge">Kodi Bridge URL</label><input id="bridge" readonly disabled aria-describedby="technicalPrivacy"></div>
+              <button id="copyBridgeBtn" class="b compact" type="button" data-copy="bridge" disabled>Copy Bridge URL</button>
+              <div class="field-group"><label for="manifest">Jumpgate manifest URL</label><input id="manifest" readonly disabled aria-describedby="technicalPrivacy"></div>
+              <button id="copyTechnicalManifestBtn" class="b compact" type="button" data-copy="manifest" disabled>Copy manifest URL</button>
+            </div>
+          </details>
+        </div>
+      </section>
+
+      <footer id="workspaceStatus" class="workspace-footer" data-state="profile" aria-label="Configuration status">
+        <span id="workspaceStatusLabel">Profile required</span>
+        <p id="workspaceStatusText">Generate a private playback profile to begin.</p>
+      </footer>
+      <footer class="publication-footer" aria-label="Bridge deployment status and policies">
+        <p class="publication-status">
+          <strong>@@JUMPGATE_DEPLOYMENT_STATUS@@</strong>
+          <span>Verify this deployment's operator and policies before use.</span>
+        </p>
+        @@JUMPGATE_POLICY_LINKS@@
+      </footer>
+    </div>
+  </main>
+
+  <dialog id="deleteProfileDialog" class="confirmation-dialog" aria-labelledby="deleteDialogHeading" aria-describedby="deleteDialogDescription">
+    <form id="deleteProfileForm" method="dialog">
+      <p class="section-kicker">Final confirmation</p>
+      <h2 id="deleteDialogHeading">Delete this Bridge profile?</h2>
+      <p id="deleteDialogDescription">This is destructive and may finish asynchronously. Type <strong>DELETE PROFILE</strong> to confirm.</p>
+      <div class="field-group">
+        <label for="deleteProfileConfirmation">Confirmation phrase</label>
+        <input id="deleteProfileConfirmation" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-describedby="deleteDialogDescription">
+      </div>
+      <div id="deleteDialogStatus" class="status-line" role="alert" aria-atomic="true"></div>
+      <div class="dialog-actions">
+        <button id="cancelDeleteProfileBtn" class="b" type="button">Cancel</button>
+        <button id="confirmDeleteProfileBtn" class="danger-button" type="submit" disabled>Delete profile permanently</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script id="jumpgate-bootstrap" nonce="@@JUMPGATE_SCRIPT_NONCE@@" type="application/json">@@JUMPGATE_BOOTSTRAP_JSON@@</script>
+  <script nonce="@@JUMPGATE_SCRIPT_NONCE@@" src="/assets/stremio-account-client.js?v=@@JUMPGATE_ASSET_REVISION@@"></script>
+  <script nonce="@@JUMPGATE_SCRIPT_NONCE@@" src="/assets/configure.js?v=@@JUMPGATE_ASSET_REVISION@@"></script>
+</body>
+</html>

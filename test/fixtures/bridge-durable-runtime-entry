@@ -1,0 +1,80 @@
+"use strict";
+
+const http = require("node:http");
+const path = require("node:path");
+
+if (process.env.NODE_ENV !== "test") {
+  throw new Error("durable runtime fixture requires NODE_ENV=test");
+}
+
+const app = require(path.resolve(__dirname, "..", "..", "index.js"));
+
+const STREAM = Object.freeze({
+  name: "Durable fixture provider",
+  title: "1080p",
+  url: "https://media.example/durable-fixture.mkv?token=fixture-private",
+  behaviorHints: Object.freeze({ notWebReady: true }),
+});
+
+app.setProviderGatewayFetchPolicyForTest({
+  async fetchJson(rawUrl) {
+    const url = new URL(rawUrl);
+    const match = /^\/stream\/(?:movie|series)\/([^/]+)\.json$/.exec(url.pathname);
+    let resourceId = "";
+    try {
+      resourceId = match ? decodeURIComponent(match[1]) : "";
+    } catch (_error) {
+      resourceId = "";
+    }
+    if (
+      url.origin !== "https://durable-provider.invalid" ||
+      !/^[A-Za-z0-9:._-]+$/.test(resourceId)
+    ) {
+      const error = new Error("durable provider fixture rejected the request");
+      error.code = "test_provider_request_rejected";
+      throw error;
+    }
+    return { value: { streams: [STREAM] }, status: 200, redirects: 0 };
+  },
+});
+
+const port = Number(process.env.PORT);
+const host = process.env.HOST || "127.0.0.1";
+if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
+  throw new Error("durable runtime fixture requires a valid PORT");
+}
+
+const server = http.createServer(app);
+let shutdownPromise = null;
+
+function shutdown(signal) {
+  if (shutdownPromise) return shutdownPromise;
+  shutdownPromise = (async () => {
+    if (signal) console.log("[shutdown] received " + signal);
+    await new Promise((resolve) => server.close(resolve));
+    await app.closeStorage();
+  })().catch(() => {
+    console.error("[shutdown] graceful shutdown failed");
+    process.exitCode = 1;
+  });
+  return shutdownPromise;
+}
+
+server.listen(port, host, () => {
+  const address = server.address();
+  console.log("[startup] listening address=" + address.address + " port=" + address.port);
+});
+server.on("error", () => {
+  console.error("[startup] HTTP server failed");
+  process.exitCode = 1;
+  void shutdown();
+});
+process.once("SIGTERM", () => void shutdown("SIGTERM"));
+process.once("SIGINT", () => void shutdown("SIGINT"));
+
+void app.storageReady().catch((error) => {
+  const code = error && typeof error.code === "string" ? " code=" + error.code : "";
+  console.error("[startup] storage initialization failed" + code);
+  process.exitCode = 1;
+  void shutdown();
+});

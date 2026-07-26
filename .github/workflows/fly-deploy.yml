@@ -1,0 +1,520 @@
+name: Bridge CI and Release
+
+'on':
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: Deploy protected main after every immutable-image gate passes
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bridge-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  NODE_VERSION: "24"
+  # Advance these only after the matching Kodi commit has been reviewed and pushed.
+  KODI_REPOSITORY: ruizkinio/Jumpgate-kodi
+  KODI_SHA: 06228da12a066944772fa9951652a620b6e0b95c
+  ACTIONLINT_VERSION: "1.7.9"
+  ACTIONLINT_LINUX_AMD64_SHA256: 233b280d05e100837f4af1433c7b40a5dcb306e3aa68fb4f17f8a7f45a7df7b4
+  SHELLCHECK_VERSION: "0.11.0"
+  SHELLCHECK_LINUX_X86_64_SHA256: b7af85e41cc99489dcc21d66c6d5f3685138f06d34651e6d34b42ec6d54fe6f6
+  FLYCTL_VERSION: "0.4.69-jumpgate-digest4"
+  FLYCTL_ARCHIVE_URL: https://github.com/ruizkinio/flyctl/releases/download/jumpgate-flyctl-v0.4.69-digest4/flyctl_0.4.69-jumpgate-digest4_Linux_x86_64.tar.gz
+  FLYCTL_LINUX_X86_64_SHA256: d9f1a798980f50a3091aaad60956b35f3c7a2795677287d5257fac876137da80
+  CONTAINER_NODE_IMAGE: node:24-alpine@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd
+  CONTAINER_POSTGRES_IMAGE: postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
+  CONTAINER_REDIS_IMAGE: redis:8.2-alpine@sha256:223b183cbc49f5ff48728e1fc52ccf101f05072decad2bd9867281a3c9bf75fd
+
+jobs:
+  quality:
+    name: Quality / Node 24
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out Bridge
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Install checksum-pinned workflow validators
+        run: |
+          set -euo pipefail
+          tools_dir="$RUNNER_TEMP/bridge-ci-tools"
+          bin_dir="$tools_dir/bin"
+          mkdir -p "$bin_dir" "$tools_dir/actionlint" "$tools_dir/shellcheck"
+
+          actionlint_archive="$tools_dir/actionlint.tar.gz"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+            --output "$actionlint_archive" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          printf '%s  %s\n' "$ACTIONLINT_LINUX_AMD64_SHA256" "$actionlint_archive" |
+            sha256sum --check --strict
+          tar --extract --gzip --file "$actionlint_archive" --directory "$tools_dir/actionlint"
+          install -m 0755 "$tools_dir/actionlint/actionlint" "$bin_dir/actionlint"
+
+          shellcheck_archive="$tools_dir/shellcheck.tar.gz"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+            --output "$shellcheck_archive" \
+            "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.gz"
+          printf '%s  %s\n' "$SHELLCHECK_LINUX_X86_64_SHA256" "$shellcheck_archive" |
+            sha256sum --check --strict
+          tar --extract --gzip --file "$shellcheck_archive" --directory "$tools_dir/shellcheck"
+          install -m 0755 \
+            "$tools_dir/shellcheck/shellcheck-v${SHELLCHECK_VERSION}/shellcheck" \
+            "$bin_dir/shellcheck"
+
+          "$bin_dir/actionlint" -version | grep -Fx "$ACTIONLINT_VERSION"
+          "$bin_dir/shellcheck" --version | grep -F "version: $SHELLCHECK_VERSION"
+          echo "$bin_dir" >> "$GITHUB_PATH"
+      - name: Validate workflow YAML, expressions, and embedded shell
+        run: actionlint -color .github/workflows/*.yml
+      - name: Check Ruby Psych test prerequisite
+        run: node scripts/ci/tooling-prerequisites.js
+      - name: Run CI policy self-tests
+        run: node --test scripts/ci/*.test.js
+      - name: Check repository, credentials, actions, and package artifact
+        run: node scripts/ci/repository-policy.js
+      - name: Check changed whitespace
+        run: |
+          if git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+            git diff --check HEAD^ HEAD
+          fi
+          git diff --check
+      - name: Parse every tracked JavaScript file
+        run: git ls-files -z -- '*.js' | xargs -0 -r -n 1 node --check --
+      - name: Run complete test suite
+        run: node --test
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+      - name: Verify installation leaves tracked inputs unchanged
+        run: |
+          git diff --exit-code -- package.json package-lock.json
+          test -z "$(git status --short --untracked-files=no)"
+      - name: Write quality summary
+        if: always()
+        run: |
+          {
+            echo "### Bridge quality"
+            echo "- Node: $(node --version)"
+            echo "- Actionlint, ShellCheck, policy tests, tracked-JS parsing, full tests, and audit executed."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  redis-live:
+    name: Redis ${{ matrix.redis_major }} / 48 live contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - redis_major: "7"
+            redis_image: redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
+          - redis_major: "8"
+            redis_image: redis:8.2-alpine@sha256:223b183cbc49f5ff48728e1fc52ccf101f05072decad2bd9867281a3c9bf75fd
+    services:
+      redis:
+        image: ${{ matrix.redis_image }}
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      REDIS_URL: redis://127.0.0.1:6379/0
+    steps:
+      - name: Check out Bridge
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Run every live Redis contract without skips
+        run: >-
+          node scripts/ci/node-test-gate.js
+          --expected-tests=48
+          --no-skips
+          --
+          --test-timeout=120000
+          test/storage-redis-integration.test.js
+          test/storage-redis-subtitle-delivery.test.js
+          test/provider-snapshot-recovery-integration.test.js
+          test/playback-claim-writer-protocol-redis.test.js
+
+  postgres-live:
+    name: PostgreSQL ${{ matrix.postgres_major }} / 22 live storage contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - postgres_major: "16"
+            postgres_image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+          - postgres_major: "17"
+            postgres_image: postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
+    services:
+      postgres:
+        image: ${{ matrix.postgres_image }}
+        env:
+          POSTGRES_DB: jumpgate_ci
+          POSTGRES_USER: jumpgate
+          POSTGRES_PASSWORD: jumpgate_ci_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U jumpgate -d jumpgate_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      redis:
+        image: redis:8.2-alpine@sha256:223b183cbc49f5ff48728e1fc52ccf101f05072decad2bd9867281a3c9bf75fd
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      JUMPGATE_POSTGRES_LIVE_AGGREGATE: "1"
+      TEST_POSTGRES_URL: postgresql://jumpgate:jumpgate_ci_password@127.0.0.1:5432/jumpgate_ci
+      REDIS_URL: redis://127.0.0.1:6379/0
+    steps:
+      - name: Check out Bridge
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Run every live PostgreSQL and cross-store contract without skips
+        run: >-
+          node scripts/ci/node-test-gate.js
+          --expected-tests=22
+          --no-skips
+          --
+          --test-concurrency=1
+          test/storage-postgres-integration.test.js
+          test/storage-postgres-playback-session.test.js
+          test/storage-history-grant-migrations.test.js
+          test/storage-history-grant-parity.test.js
+
+  fingerprint-parity:
+    name: Bridge / Kodi fingerprint parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out Bridge
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Validate pinned Kodi source
+        run: |
+          test "$KODI_REPOSITORY" = "ruizkinio/Jumpgate-kodi"
+          test "$KODI_SHA" = "06228da12a066944772fa9951652a620b6e0b95c"
+      - name: Check out exact Kodi commit
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: ${{ env.KODI_REPOSITORY }}
+          ref: ${{ env.KODI_SHA }}
+          path: .ci/kodi
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Verify exact checkout and fixture parity without skips
+        env:
+          JUMPGATE_KODI_FINGERPRINT_FIXTURE: ${{ github.workspace }}/.ci/kodi/xbmc/utils/test/fixtures/source-fingerprint-v1.json
+        run: |
+          test "$(git -C .ci/kodi rev-parse HEAD)" = "$KODI_SHA"
+          test -f "$JUMPGATE_KODI_FINGERPRINT_FIXTURE"
+          node scripts/ci/verify-kodi-version-parity.js .ci/kodi/xbmc/platform/android/activity/XBMCApp.h
+          node scripts/ci/node-test-gate.js \
+            --minimum-tests=1 \
+            --no-skips \
+            -- \
+            test/source-fingerprint-fixtures.test.js
+
+  container-smoke:
+    name: Immutable production image / PostgreSQL + Redis + private S3
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    outputs:
+      archive-sha256: ${{ steps.export-image.outputs.archive-sha256 }}
+    steps:
+      - name: Check out Bridge
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Build the only release image
+        run: |
+          docker build --pull \
+            --build-arg "JUMPGATE_BUILD_SHA=$GITHUB_SHA" \
+            --tag "jumpgate-bridge:$GITHUB_SHA" \
+            .
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "jumpgate-bridge:$GITHUB_SHA")" = "$GITHUB_SHA"
+          test "$(docker image inspect --format '{{.Config.User}}' "jumpgate-bridge:$GITHUB_SHA")" = "node"
+      - name: Validate the exact image against isolated production protocols
+        run: bash scripts/ci/container-smoke-topology.sh
+      - name: Export integrity-bound release image
+        id: export-image
+        if: >-
+          success() &&
+          github.ref == 'refs/heads/main' &&
+          github.ref_protected == true &&
+          (github.event_name == 'push' ||
+           (github.event_name == 'workflow_dispatch' && inputs.deploy))
+        run: |
+          set -euo pipefail
+          artifact_dir="$RUNNER_TEMP/jumpgate-image"
+          mkdir -p "$artifact_dir"
+          docker save "jumpgate-bridge:$GITHUB_SHA" --output "$artifact_dir/jumpgate-image.tar"
+          (
+            cd "$artifact_dir"
+            sha256sum jumpgate-image.tar > jumpgate-image.tar.sha256
+          )
+          archive_sha256="$(sha256sum "$artifact_dir/jumpgate-image.tar" | cut -d ' ' -f 1)"
+          [[ "$archive_sha256" =~ ^[a-f0-9]{64}$ ]]
+          echo "archive-sha256=$archive_sha256" >> "$GITHUB_OUTPUT"
+      - name: Preserve exact image for deployment
+        if: >-
+          success() &&
+          github.ref == 'refs/heads/main' &&
+          github.ref_protected == true &&
+          (github.event_name == 'push' ||
+           (github.event_name == 'workflow_dispatch' && inputs.deploy))
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: jumpgate-image-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/jumpgate-image/jumpgate-image.tar
+            ${{ runner.temp }}/jumpgate-image/jumpgate-image.tar.sha256
+          if-no-files-found: error
+          retention-days: 35
+          compression-level: 0
+
+  deploy:
+    name: Fly production / exact tested digest
+    needs:
+      - quality
+      - redis-live
+      - postgres-live
+      - fingerprint-parity
+      - container-smoke
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      github.ref_protected == true &&
+      (github.event_name == 'push' ||
+       (github.event_name == 'workflow_dispatch' && inputs.deploy))
+    runs-on: ubuntu-latest
+    timeout-minutes: 210
+    # Branch protection and the protected production environment are external
+    # repository settings documented in scripts/ci/RELEASE_GATES.md.
+    environment:
+      name: production
+      url: https://jumpgate-bridge.fly.dev/configure
+    concurrency:
+      group: fly-production
+      cancel-in-progress: false
+    steps:
+      - name: Check out Bridge
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Validate checked-in Fly state before any registry or Fly mutation
+        run: >-
+          node scripts/ci/fly-managed-rollout.js validate
+          --app=jumpgate-bridge
+          --config=fly.toml
+      - name: Download exact tested image
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: jumpgate-image-${{ github.sha }}
+          path: ${{ runner.temp }}/jumpgate-image
+      - name: Verify artifact integrity, provenance, and identity
+        env:
+          EXPECTED_ARCHIVE_SHA256: ${{ needs.container-smoke.outputs.archive-sha256 }}
+        run: |
+          set -euo pipefail
+          artifact_dir="$RUNNER_TEMP/jumpgate-image"
+          [[ "$EXPECTED_ARCHIVE_SHA256" =~ ^[a-f0-9]{64}$ ]]
+          (
+            cd "$artifact_dir"
+            sha256sum --check --strict jumpgate-image.tar.sha256
+          )
+          actual_sha256="$(sha256sum "$artifact_dir/jumpgate-image.tar" | cut -d ' ' -f 1)"
+          test "$actual_sha256" = "$EXPECTED_ARCHIVE_SHA256"
+          docker load --input "$artifact_dir/jumpgate-image.tar" >/dev/null
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "jumpgate-bridge:$GITHUB_SHA")" = "$GITHUB_SHA"
+      - name: Install and verify pinned Fly CLI before authentication
+        run: |
+          set -euo pipefail
+          tool_dir="$RUNNER_TEMP/flyctl-${FLYCTL_VERSION}"
+          archive="$RUNNER_TEMP/flyctl-${FLYCTL_VERSION}.tar.gz"
+          mkdir -p "$tool_dir"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+            --output "$archive" \
+            "$FLYCTL_ARCHIVE_URL"
+          printf '%s  %s\n' "$FLYCTL_LINUX_X86_64_SHA256" "$archive" |
+            sha256sum --check --strict
+          tar --extract --gzip --file "$archive" --directory "$tool_dir"
+          install -m 0755 "$tool_dir/flyctl" "$tool_dir/flyctl-verified"
+          "$tool_dir/flyctl-verified" version 2>&1 |
+            grep -F "flyctl v${FLYCTL_VERSION} linux/amd64"
+          echo "FLYCTL_BIN=$tool_dir/flyctl-verified" >> "$GITHUB_ENV"
+      - name: Authenticate the verified CLI to Fly registry
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          NO_COLOR: "1"
+        run: "$FLYCTL_BIN auth docker"
+      - name: Push tested image and resolve immutable registry digest
+        run: |
+          set -euo pipefail
+          remote_tag="registry.fly.io/jumpgate-bridge:git-$GITHUB_SHA"
+          push_log="$RUNNER_TEMP/fly-image-push.log"
+          docker tag "jumpgate-bridge:$GITHUB_SHA" "$remote_tag"
+          docker push "$remote_tag" 2>&1 | tee "$push_log"
+          digest="$(sed -n 's/^.*digest: \(sha256:[a-f0-9]\{64\}\).*$/\1/p' "$push_log" | tail -n 1)"
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          manifest="$(
+            docker buildx imagetools inspect "$remote_tag@$digest" --format '{{json .Manifest}}'
+          )"
+          resolved_digest="$(
+            node -e '
+              const fs = require("node:fs");
+              const value = JSON.parse(fs.readFileSync(0, "utf8"));
+              if (!value || !/^sha256:[a-f0-9]{64}$/.test(value.digest || "")) process.exit(1);
+              process.stdout.write(value.digest);
+            ' <<<"$manifest"
+          )"
+          test "$resolved_digest" = "$digest"
+          {
+            echo "IMMUTABLE_IMAGE_REF=$remote_tag@$digest"
+            echo "IMAGE_DIGEST=$digest"
+          } >> "$GITHUB_ENV"
+      - name: Remove registry credentials
+        if: always()
+        run: docker logout registry.fly.io >/dev/null 2>&1 || true
+      - name: Probe the exact candidate image and plan the writer rollout
+        id: writer-protocol
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          NO_COLOR: "1"
+        run: >-
+          node scripts/ci/fly-managed-rollout.js plan
+          --app=jumpgate-bridge
+          --config=fly.toml
+          --image="$IMMUTABLE_IMAGE_REF"
+          >> "$GITHUB_OUTPUT"
+      - name: Deploy transition writers with the resolved immutable digest
+        if: steps.writer-protocol.outputs.transition_required == 'true'
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          "$FLYCTL_BIN" deploy \
+            --app jumpgate-bridge \
+            --config fly.toml \
+            --image "$IMMUTABLE_IMAGE_REF" \
+            --env JUMPGATE_REDIS_PLAYBACK_CLAIM_ROLLOUT_MODE=transition \
+            --strategy rolling \
+            --wait-timeout 10m \
+            --yes
+      - name: Attest the exact transition fleet across repeated intervals
+        if: steps.writer-protocol.outputs.transition_required == 'true'
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: >-
+          node scripts/ci/fly-managed-rollout.js attest
+          --app=jumpgate-bridge
+          --config=fly.toml
+          --image="$IMMUTABLE_IMAGE_REF"
+          --base-url=https://jumpgate-bridge.fly.dev
+          --phase=transition
+      - name: Advance the protocol and deploy final v6 writers with the same digest
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          "$FLYCTL_BIN" deploy \
+            --app jumpgate-bridge \
+            --config fly.toml \
+            --image "$IMMUTABLE_IMAGE_REF" \
+            --env JUMPGATE_REDIS_PLAYBACK_CLAIM_ROLLOUT_MODE=v6 \
+            --strategy rolling \
+            --wait-timeout 10m \
+            --yes
+      - name: Attest the exact final v6 fleet across repeated intervals
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: >-
+          node scripts/ci/fly-managed-rollout.js attest
+          --app=jumpgate-bridge
+          --config=fly.toml
+          --image="$IMMUTABLE_IMAGE_REF"
+          --base-url=https://jumpgate-bridge.fly.dev
+          --phase=v6
+      - name: Validate exact public production provenance without logging bodies
+        run: |
+          expected_version="$(node -p "require('./package.json').version")"
+          node scripts/ci/http-smoke.js \
+            --base-url=https://jumpgate-bridge.fly.dev \
+            --expected-version="$expected_version" \
+            --expected-build-sha="$GITHUB_SHA" \
+            --expected-readiness=ready \
+            --deadline-ms=60000 \
+            --delay-ms=2000
+          {
+            echo "### Fly production"
+            echo "- Exact build SHA: \`$GITHUB_SHA\`"
+            echo "- Immutable registry digest: \`$IMAGE_DIGEST\`"
+            echo "- The candidate protocol was probed before rollout; any required transition and the final v6 fleet used the same digest."
+            echo "- Final health, readiness, version, manifest, configure, and provenance passed."
+          } >> "$GITHUB_STEP_SUMMARY"

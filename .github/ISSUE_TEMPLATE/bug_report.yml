@@ -1,0 +1,114 @@
+name: Bug report
+description: Report a reproducible Jumpgate Bridge defect with sanitized evidence.
+title: "[Bug]: "
+labels: []
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Jumpgate Bridge is pre-release. Private vulnerability reporting is available through the verified link in SECURITY.md. Do not disclose a suspected vulnerability here or anywhere public.
+
+        Never post configured addon URLs, pairing codes, management links, device/profile tokens, provider or debrid URLs/headers/cookies, Stremio credentials, Trakt or TMDB credentials, Fly.io or deployment secrets, or raw private logs. Use synthetic values and consistent placeholders.
+  - type: checkboxes
+    id: public_report_checks
+    attributes:
+      label: Public report checks
+      options:
+        - label: This is not a security vulnerability or suspected cross-profile data exposure.
+          required: true
+        - label: I manually reviewed this report and removed every private URL, capability, credential, cookie, secret, and raw log.
+          required: true
+        - label: I understand that a short-lived or encrypted value can still be a private capability.
+          required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment
+      description: Do not include an origin, configured URL, application name, or account identifier.
+      options:
+        - Project-hosted pre-release instance
+        - Self-hosted production mode
+        - Self-hosted development or test mode
+        - Unsure
+    validations:
+      required: true
+  - type: input
+    id: bridge_version
+    attributes:
+      label: Bridge version or commit
+      description: Use the semantic version, build SHA, or commit only.
+      placeholder: "3.0.0 or commit SHA"
+    validations:
+      required: true
+  - type: input
+    id: client_versions
+    attributes:
+      label: Client and device versions
+      description: Include Jumpgate/Kodi, Stremio, Android, and device ABI only when relevant.
+      placeholder: "Jumpgate version; Stremio version; Android version; arm64-v8a"
+    validations:
+      required: false
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - Pairing or profile management
+        - Provider import or gateway
+        - Stream source claim or playback
+        - History or resume
+        - Trakt integration
+        - TMDB metadata
+        - Subtitle delivery
+        - Self-host storage or deployment
+        - Other Bridge behavior
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: Use synthetic accounts and describe the smallest repeatable flow.
+      placeholder: |
+        1. Start from ...
+        2. Call or select ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include a stable HTTP status or error code, not a private response body.
+    validations:
+      required: true
+  - type: input
+    id: observed_at
+    attributes:
+      label: Observation time
+      description: Supply UTC or include the timezone.
+      placeholder: "2026-07-15 12:34 UTC"
+    validations:
+      required: false
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics
+      description: Paste only the minimum manually reviewed excerpt. Do not attach raw logs, HAR files, dumps, or screenshots containing private data.
+      render: shell
+    validations:
+      required: false
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional sanitized context
+      description: State feature flags or whether Trakt, TMDB, subtitles, and provider import were enabled. Do not name private providers or hosts.
+    validations:
+      required: false

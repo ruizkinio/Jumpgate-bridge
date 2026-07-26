@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Jumpgate</title>
+  <desc id="desc">An angular passage surrounded by blue orbital rings.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#17222c"/>
+      <stop offset="1" stop-color="#080c11"/>
+    </linearGradient>
+    <linearGradient id="ice" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7de4ff"/>
+      <stop offset="0.55" stop-color="#169dcb"/>
+      <stop offset="1" stop-color="#03678f"/>
+    </linearGradient>
+    <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect width="512" height="512" rx="42" fill="url(#bg)"/>
+  <circle cx="256" cy="256" r="184" fill="none" stroke="#263a48" stroke-width="12"/>
+  <circle cx="256" cy="256" r="164" fill="none" stroke="url(#ice)" stroke-width="12" stroke-linecap="square" stroke-dasharray="600 150" transform="rotate(-38 256 256)" filter="url(#glow)"/>
+  <circle cx="256" cy="256" r="132" fill="#0c1218" stroke="#36596d" stroke-width="5"/>
+  <path d="M118 256 225 151v58l-49 47 49 47v58z" fill="url(#ice)"/>
+  <path d="m394 256-107-105v58l49 47-49 47v58z" fill="url(#ice)"/>
+  <path d="M226 151h61l-37 58h-61zM226 361h61l-37-58h-61z" fill="#d9f7ff" opacity=".88"/>
+  <circle cx="256" cy="256" r="13" fill="#e9fbff" filter="url(#glow)"/>
+</svg>
