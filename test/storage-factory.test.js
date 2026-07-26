@@ -7,10 +7,17 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { test } = require("node:test");
+const { SimpleError } = require("redis");
 
 const CANARY_BODY = Buffer.from([0xa5]);
 const CANARY_SHA256 = crypto.createHash("sha256").update(CANARY_BODY).digest("hex");
 const TIGRIS_ORG_ADMIN_ACL_URI = "https://groups.tigris.dev/org/admins";
+const UPSTASH_ROLE_UNAVAILABLE_MESSAGE =
+  "ERR Command is not available: 'ROLE'. See https://upstash.com/docs/redis/overall/rediscompatibility for details";
+
+function managedUpstashRoleUnavailableError(message = UPSTASH_ROLE_UNAVAILABLE_MESSAGE) {
+  return new SimpleError(message);
+}
 
 const {
   assertObjectStore,
@@ -159,6 +166,8 @@ class FakeRedisClient extends EventEmitter {
     this.connectImpl = options.connectImpl || null;
     this.pingImpl = options.pingImpl || null;
     this.sendCommandImpl = options.sendCommandImpl || null;
+    this.hasRoleError = Object.prototype.hasOwnProperty.call(options, "roleError");
+    this.roleError = options.roleError;
     this.roleReply = options.roleReply || ["master", 0, []];
     this.serverInfo = options.serverInfo || "# Server\r\nredis_version:8.2.0\r\n";
     this.clusterInfo = options.clusterInfo || "# Cluster\r\ncluster_enabled:0\r\n";
@@ -191,6 +200,7 @@ class FakeRedisClient extends EventEmitter {
     this.commands.push(command.slice());
     const name = String(command[0]).toUpperCase();
     if (name === "INFO" && command[1] === "server") return this.serverInfo;
+    if (name === "ROLE" && this.hasRoleError) throw this.roleError;
     if (this.sendCommandImpl) return this.sendCommandImpl(command, this);
     if (name === "INFO") {
       assert.deepEqual(command, ["INFO", "cluster"]);
@@ -819,7 +829,9 @@ test("production preflight probes and closes PostgreSQL before constructing Redi
       Pool: PreflightPool,
       createRedisClient() {
         events.push("redis:construct");
-        redisClient = new PreflightRedisClient();
+        redisClient = new PreflightRedisClient({
+          roleError: managedUpstashRoleUnavailableError(),
+        });
         return redisClient;
       },
       S3Client: PreflightS3Client,
@@ -843,6 +855,13 @@ test("production preflight probes and closes PostgreSQL before constructing Redi
   assert.equal(pool.ended, 1);
   assert.equal(redisClient.quitCalls, 1);
   assert.equal(s3Client.destroyCalls, 1);
+  assert.deepEqual(
+    redisClient.commands.slice(0, 6).map((command) => command[0]),
+    ["INFO", "INFO", "CONFIG", "ROLE", "SET", "DEL"]
+  );
+  const writeProbe = redisClient.commands[4];
+  assert.deepEqual(writeProbe.slice(3), ["NX", "PX", "5000"]);
+  assert.deepEqual(redisClient.commands[5], ["DEL", writeProbe[1]]);
   assert.deepEqual(result.redis, {
     major: 8,
     protocolState: "missing",
@@ -2968,6 +2987,202 @@ test("Redis readiness rejects replicas and read-only primaries with startup clea
   assert.equal(readOnlyPool.ended, 1);
   assert.equal(readOnly.listenerCount("error"), 0);
   assert.equal(readOnlyPool.listenerCount("error"), 0);
+});
+
+test("Redis readiness accepts only the exact managed Upstash ROLE-unavailable response", async () => {
+  const pool = new FakePool();
+  const redisClient = new FakeRedisClient({
+    roleError: managedUpstashRoleUnavailableError(),
+  });
+  const runtime = await createStorageRuntime(developmentRedisConfig(), {
+    createPostgresPool: () => pool,
+    createRedisClient: () => redisClient,
+    runPostgresMigrations: async () => ({ applied: [], alreadyApplied: [], verified: [] }),
+    attestProviderMutationMode: async () => {},
+  });
+
+  const write = redisClient.commands.find((command) => command[0] === "SET");
+  const cleanup = redisClient.commands.find((command) => command[0] === "DEL");
+  assert.deepEqual(redisClient.commands.slice(0, 4).map((command) => command[0]), [
+    "INFO",
+    "ROLE",
+    "SET",
+    "DEL",
+  ]);
+  assert.match(write[1], /^jg:v1:readiness:[a-f0-9]{64}$/);
+  assert.deepEqual(write.slice(3), ["NX", "PX", "5000"]);
+  assert.deepEqual(cleanup, ["DEL", write[1]]);
+  assert.equal(redisClient.values.has(write[1]), false);
+
+  await runtime.ready();
+  const writes = redisClient.commands.filter((command) => command[0] === "SET");
+  const cleanups = redisClient.commands.filter((command) => command[0] === "DEL");
+  assert.equal(writes.length, 2);
+  assert.equal(cleanups.length, 2);
+  assert.notEqual(writes[0][1], writes[1][1]);
+  assert.deepEqual(cleanups[1], ["DEL", writes[1][1]]);
+  assert.equal(redisClient.values.has(writes[1][1]), false);
+
+  await runtime.close();
+  assert.equal(redisClient.quitCalls, 1);
+  assert.equal(pool.ended, 1);
+
+  const exactGetter = managedUpstashRoleUnavailableError();
+  let exactGetterCalls = 0;
+  Object.defineProperty(exactGetter, "message", {
+    configurable: true,
+    get() {
+      exactGetterCalls += 1;
+      return UPSTASH_ROLE_UNAVAILABLE_MESSAGE;
+    },
+  });
+  const throwingGetter = managedUpstashRoleUnavailableError();
+  let throwingGetterCalls = 0;
+  Object.defineProperty(throwingGetter, "message", {
+    configurable: true,
+    get() {
+      throwingGetterCalls += 1;
+      throw new Error("hostile message accessor");
+    },
+  });
+  const constructorNameGetter = managedUpstashRoleUnavailableError();
+  let constructorNameGetterCalls = 0;
+  const hostileConstructor = {};
+  Object.defineProperty(hostileConstructor, "name", {
+    configurable: true,
+    get() {
+      constructorNameGetterCalls += 1;
+      return "SimpleError";
+    },
+  });
+  Object.setPrototypeOf(
+    constructorNameGetter,
+    Object.create(Error.prototype, {
+      constructor: { value: hostileConstructor },
+    })
+  );
+  const LookalikeSimpleError = class SimpleError extends Error {};
+
+  for (const roleError of [
+    managedUpstashRoleUnavailableError("ERR Command is not available: 'role'. See https://upstash.com/docs/redis/overall/rediscompatibility for details"),
+    managedUpstashRoleUnavailableError(UPSTASH_ROLE_UNAVAILABLE_MESSAGE + "."),
+    managedUpstashRoleUnavailableError("ERR unknown command 'ROLE'"),
+    managedUpstashRoleUnavailableError("NOPERM this user has no permissions to run the 'ROLE' command"),
+    managedUpstashRoleUnavailableError("Socket closed unexpectedly"),
+    new Error(UPSTASH_ROLE_UNAVAILABLE_MESSAGE),
+    exactGetter,
+    throwingGetter,
+    constructorNameGetter,
+    new LookalikeSimpleError(UPSTASH_ROLE_UNAVAILABLE_MESSAGE),
+    { message: UPSTASH_ROLE_UNAVAILABLE_MESSAGE },
+    UPSTASH_ROLE_UNAVAILABLE_MESSAGE,
+    null,
+  ]) {
+    const rejectedPool = new FakePool();
+    const rejectedClient = new FakeRedisClient({ roleError });
+    await assert.rejects(
+      createStorageRuntime(developmentRedisConfig(), {
+        createPostgresPool: () => rejectedPool,
+        createRedisClient: () => rejectedClient,
+        runPostgresMigrations: async () => ({ applied: [], alreadyApplied: [], verified: [] }),
+        attestProviderMutationMode: async () => {},
+      }),
+      roleError instanceof Error ? (error) => error === roleError : undefined
+    );
+    assert.deepEqual(
+      rejectedClient.commands.map((command) => command[0]),
+      ["INFO", "ROLE"]
+    );
+    assert.equal(rejectedClient.quitCalls, 1);
+    assert.equal(rejectedPool.ended, 1);
+  }
+  assert.equal(exactGetterCalls, 0);
+  assert.equal(throwingGetterCalls, 0);
+  assert.equal(constructorNameGetterCalls, 0);
+});
+
+test("Redis readiness requires exact write and cleanup acknowledgements", async () => {
+  for (const [reply, pattern] of [
+    ["ok", /write probe was not stored/],
+    [null, /write reply is invalid/],
+    [true, /write reply is invalid/],
+  ]) {
+    const pool = new FakePool();
+    const redisClient = new FakeRedisClient({
+      sendCommandImpl: async (command) => {
+        if (command[0] === "INFO") return "# Cluster\r\ncluster_enabled:0\r\n";
+        if (command[0] === "ROLE") return ["master", 0, []];
+        if (command[0] === "SET") return reply;
+        throw new Error("unexpected Redis command");
+      },
+    });
+    await assert.rejects(
+      createStorageRuntime(developmentRedisConfig(), {
+        createPostgresPool: () => pool,
+        createRedisClient: () => redisClient,
+        runPostgresMigrations: async () => ({ applied: [], alreadyApplied: [], verified: [] }),
+        attestProviderMutationMode: async () => {},
+      }),
+      pattern
+    );
+    assert.deepEqual(redisClient.commands.map((command) => command[0]), ["INFO", "ROLE", "SET"]);
+    assert.equal(redisClient.quitCalls, 1);
+    assert.equal(pool.ended, 1);
+  }
+
+  for (const reply of [0, "1", true, 2, null]) {
+    const pool = new FakePool();
+    const redisClient = new FakeRedisClient({
+      sendCommandImpl: async (command) => {
+        if (command[0] === "INFO") return "# Cluster\r\ncluster_enabled:0\r\n";
+        if (command[0] === "ROLE") return ["master", 0, []];
+        if (command[0] === "SET") return "OK";
+        if (command[0] === "DEL") return reply;
+        throw new Error("unexpected Redis command");
+      },
+    });
+    await assert.rejects(
+      createStorageRuntime(developmentRedisConfig(), {
+        createPostgresPool: () => pool,
+        createRedisClient: () => redisClient,
+        runPostgresMigrations: async () => ({ applied: [], alreadyApplied: [], verified: [] }),
+        attestProviderMutationMode: async () => {},
+      }),
+      /write probe cleanup failed/
+    );
+    assert.deepEqual(redisClient.commands.map((command) => command[0]), ["INFO", "ROLE", "SET", "DEL"]);
+    assert.equal(redisClient.quitCalls, 1);
+    assert.equal(pool.ended, 1);
+  }
+
+  const cleanupError = new Error("Redis readiness cleanup unavailable");
+  const cleanupPool = new FakePool();
+  const cleanupClient = new FakeRedisClient({
+    sendCommandImpl: async (command) => {
+      if (command[0] === "INFO") return "# Cluster\r\ncluster_enabled:0\r\n";
+      if (command[0] === "ROLE") return ["master", 0, []];
+      if (command[0] === "SET") return "OK";
+      if (command[0] === "DEL") throw cleanupError;
+      throw new Error("unexpected Redis command");
+    },
+  });
+  await assert.rejects(
+    createStorageRuntime(developmentRedisConfig(), {
+      createPostgresPool: () => cleanupPool,
+      createRedisClient: () => cleanupClient,
+      runPostgresMigrations: async () => ({ applied: [], alreadyApplied: [], verified: [] }),
+      attestProviderMutationMode: async () => {},
+    }),
+    (error) => error === cleanupError
+  );
+  assert.deepEqual(cleanupClient.commands.map((command) => command[0]), [
+    "INFO",
+    "ROLE",
+    "SET",
+    "DEL",
+  ]);
+  assert.equal(cleanupClient.quitCalls, 1);
+  assert.equal(cleanupPool.ended, 1);
 });
 
 test("Redis readiness fails closed for cluster nodes, redirects, and malformed topology", async () => {
