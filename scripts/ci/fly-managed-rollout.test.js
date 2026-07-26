@@ -451,6 +451,22 @@ test("workflow probes first, conditionally transitions, and always finishes on v
     workflow,
     /FLYCTL_LINUX_X86_64_SHA256: d9f1a798980f50a3091aaad60956b35f3c7a2795677287d5257fac876137da80/
   );
+  assert.match(
+    workflow,
+    /FLYCTL_SOURCE_COMMIT: cc9795507584be17cad4d15af0752195af4c403d/
+  );
+  assert.match(
+    workflow,
+    /FLYCTL_LINUX_X86_64_BINARY_SHA256: 70afd975429f8fad178ed2aeab936883d7162a2526311db9746f14e5bf69c783/
+  );
+  assert.match(workflow, /FLYCTL_BUILD_DATE: "2026-07-19T02:19:27\+02:00"/);
+  assert.match(
+    workflow,
+    /test "\$version_output" = \\\n\s+"flyctl-verified v\$\{FLYCTL_VERSION\} linux\/amd64 Commit: \$\{FLYCTL_SOURCE_COMMIT\} BuildDate: \$\{FLYCTL_BUILD_DATE\}"/
+  );
+  assert.doesNotMatch(workflow, /grep -F "flyctl v\$\{FLYCTL_VERSION\}/);
+  assert.match(workflow, /test "\$\(tar --list --gzip --file "\$archive"\)" = "flyctl"/);
+  assert.match(workflow, /\\"Environment\\":\\"production\\"/);
   assert.doesNotMatch(workflow, /github\.com\/superfly\/flyctl\/releases\/download/);
   assert.ok(candidatePlan > -1);
   assert.ok(transitionDeploy > candidatePlan);

@@ -82,6 +82,10 @@ const WORKFLOW_ENV = Object.freeze({
     "https://github.com/ruizkinio/flyctl/releases/download/jumpgate-flyctl-v0.4.69-digest4/flyctl_0.4.69-jumpgate-digest4_Linux_x86_64.tar.gz",
   FLYCTL_LINUX_X86_64_SHA256:
     "d9f1a798980f50a3091aaad60956b35f3c7a2795677287d5257fac876137da80",
+  FLYCTL_LINUX_X86_64_BINARY_SHA256:
+    "70afd975429f8fad178ed2aeab936883d7162a2526311db9746f14e5bf69c783",
+  FLYCTL_SOURCE_COMMIT: "cc9795507584be17cad4d15af0752195af4c403d",
+  FLYCTL_BUILD_DATE: "2026-07-19T02:19:27+02:00",
   CONTAINER_NODE_IMAGE:
     "node:24-alpine@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd",
   CONTAINER_POSTGRES_IMAGE: POSTGRES_17_IMAGE,
@@ -110,6 +114,35 @@ const EXPORT_RUN =
   'archive_sha256="$(sha256sum "$artifact_dir/jumpgate-image.tar" | cut -d \' \' -f 1)"\n' +
   '[[ "$archive_sha256" =~ ^[a-f0-9]{64}$ ]]\n' +
   'echo "archive-sha256=$archive_sha256" >> "$GITHUB_OUTPUT"\n';
+const FLYCTL_VERIFY_RUN =
+  'set -euo pipefail\n' +
+  'tool_dir="$RUNNER_TEMP/flyctl-${FLYCTL_VERSION}"\n' +
+  'archive="$RUNNER_TEMP/flyctl-${FLYCTL_VERSION}.tar.gz"\n' +
+  'mkdir -p "$tool_dir"\n' +
+  "curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \\\n" +
+  '  --output "$archive" \\\n' +
+  '  "$FLYCTL_ARCHIVE_URL"\n' +
+  "printf '%s  %s\\n' \"$FLYCTL_LINUX_X86_64_SHA256\" \"$archive\" |\n" +
+  '  sha256sum --check --strict\n' +
+  'test "$(tar --list --gzip --file "$archive")" = "flyctl"\n' +
+  'tar --extract --gzip --file "$archive" --directory "$tool_dir"\n' +
+  "printf '%s  %s\\n' \"$FLYCTL_LINUX_X86_64_BINARY_SHA256\" \"$tool_dir/flyctl\" |\n" +
+  '  sha256sum --check --strict\n' +
+  'install -m 0755 "$tool_dir/flyctl" "$tool_dir/flyctl-verified"\n' +
+  "printf '%s  %s\\n' \"$FLYCTL_LINUX_X86_64_BINARY_SHA256\" " +
+  '"$tool_dir/flyctl-verified" |\n' +
+  '  sha256sum --check --strict\n' +
+  'version_output="$("$tool_dir/flyctl-verified" version 2>&1)"\n' +
+  'test "$version_output" = \\\n' +
+  '  "flyctl-verified v${FLYCTL_VERSION} linux/amd64 Commit: ' +
+  '${FLYCTL_SOURCE_COMMIT} BuildDate: ${FLYCTL_BUILD_DATE}"\n' +
+  'version_json_output="$("$tool_dir/flyctl-verified" version --json 2>&1)"\n' +
+  'test "$version_json_output" = \\\n' +
+  '  "{\\"Name\\":\\"flyctl-verified\\",\\"Version\\":\\"${FLYCTL_VERSION}\\",' +
+  '\\"Commit\\":\\"${FLYCTL_SOURCE_COMMIT}\\",\\"BranchName\\":\\"\\",' +
+  '\\"BuildDate\\":\\"${FLYCTL_BUILD_DATE}\\",\\"OS\\":\\"linux\\",' +
+  '\\"Architecture\\":\\"amd64\\",\\"Environment\\":\\"production\\"}"\n' +
+  'echo "FLYCTL_BIN=$tool_dir/flyctl-verified" >> "$GITHUB_ENV"\n';
 const CLEANUP_CONTAINERS = Object.freeze([
   "jumpgate-http-smoke-ci",
   "jumpgate-http-smoke-ci-public",
@@ -1415,6 +1448,15 @@ function validateWorkflow(source) {
     group: "fly-production",
     "cancel-in-progress": "false",
   });
+  const flyctlVerificationSteps = deployJob.steps.filter(
+    (step) => step.name === "Install and verify pinned Fly CLI before authentication"
+  );
+  assert.deepEqual(flyctlVerificationSteps, [
+    expectedJobStep("deploy", ["name", "run"], {
+      name: "Install and verify pinned Fly CLI before authentication",
+      run: FLYCTL_VERIFY_RUN,
+    }),
+  ]);
   const named = steps.filter((step) => step.name === STEP_NAME);
   const invocations = steps.filter((step) =>
     (step.run || "").includes("scripts/ci/container-smoke-topology.sh")
