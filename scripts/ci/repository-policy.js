@@ -17,6 +17,10 @@ const { assertRubyPsych } = require("./tooling-prerequisites");
 
 const DEFAULT_ROOT = path.join(__dirname, "..", "..");
 const WORKFLOW_ACTION_PARSER = path.join(__dirname, "workflow-action-refs.rb");
+const WORKFLOW_RELEASE_METADATA_PARSER = path.join(
+  __dirname,
+  "workflow-release-metadata.rb"
+);
 const REMOTE_ACTION_PATTERN =
   /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*@[a-f0-9]{40}$/;
 const DOCKER_ACTION_PATTERN =
@@ -549,6 +553,41 @@ function findActionReferences(workflowText, options = {}) {
   return references;
 }
 
+function parseWorkflowReleaseMetadata(workflowText, options = {}) {
+  const rubyCommand = options.rubyCommand || "ruby";
+  const parserPath = options.parserPath || WORKFLOW_RELEASE_METADATA_PARSER;
+  assertRubyPsych({ rubyCommand });
+  const result = spawnSync(rubyCommand, [parserPath], {
+    encoding: "utf8",
+    input: workflowText,
+    maxBuffer: 4 * 1024 * 1024,
+  });
+  if (result.error || result.status !== 0) {
+    throw new Error("workflow release metadata parser failed");
+  }
+
+  let metadata;
+  try {
+    metadata = JSON.parse(result.stdout);
+  } catch (_error) {
+    throw new Error("workflow release metadata parser returned invalid output");
+  }
+  if (
+    !metadata ||
+    typeof metadata !== "object" ||
+    Array.isArray(metadata) ||
+    !metadata.triggers ||
+    typeof metadata.triggers !== "object" ||
+    Array.isArray(metadata.triggers) ||
+    !metadata.jobs ||
+    typeof metadata.jobs !== "object" ||
+    Array.isArray(metadata.jobs)
+  ) {
+    throw new Error("workflow release metadata parser returned invalid metadata");
+  }
+  return metadata;
+}
+
 function validateActionReference(reference) {
   if (reference.startsWith("./")) {
     const segments = reference.slice(2).split("/");
@@ -1065,58 +1104,72 @@ function validatePublicationGate(documents) {
 
   const workflow = documents[".github/workflows/fly-deploy.yml"];
   if (typeof workflow === "string") {
-    const workflowLines = workflow.split(/\r?\n/);
-    const pushIndexes = workflowLines
-      .map((line, index) => (line === "  push:" ? index : -1))
-      .filter((index) => index >= 0);
-    let pushBlock = [];
-    if (pushIndexes.length === 1) {
-      let end = pushIndexes[0] + 1;
-      while (end < workflowLines.length && !/^  \S/.test(workflowLines[end])) end += 1;
-      pushBlock = workflowLines.slice(pushIndexes[0], end).filter((line) => line !== "");
+    let metadata = null;
+    try {
+      metadata = parseWorkflowReleaseMetadata(workflow);
+    } catch (_error) {
+      violations.push(
+        ".github/workflows/fly-deploy.yml: release metadata parser failed closed"
+      );
     }
+
+    const triggerKeys = metadata ? Object.keys(metadata.triggers).sort() : [];
+    const push = metadata && metadata.triggers.push;
     if (
-      pushIndexes.length !== 1 ||
-      JSON.stringify(pushBlock) !==
-        JSON.stringify(["  push:", "    branches:", "      - main"])
+      JSON.stringify(triggerKeys) !==
+        JSON.stringify(["pull_request", "push", "workflow_dispatch"]) ||
+      !push ||
+      typeof push !== "object" ||
+      Array.isArray(push) ||
+      JSON.stringify(Object.keys(push)) !== JSON.stringify(["branches"]) ||
+      JSON.stringify(push.branches) !== JSON.stringify(["main"])
     ) {
       violations.push(
         ".github/workflows/fly-deploy.yml: push CI must target only main with no tag trigger"
       );
     }
 
-    const exactLineOccurrences = (value) =>
-      workflowLines.filter((line) => line === value).length;
     const emittedContexts = [];
-    for (const [jobLine, context] of [
-      ["    name: Quality / Node 24", "Quality / Node 24"],
-      ["    name: Bridge / Kodi fingerprint parity", "Bridge / Kodi fingerprint parity"],
+    const jobs = metadata ? metadata.jobs : {};
+    for (const [jobId, context] of [
+      ["quality", "Quality / Node 24"],
+      ["fingerprint-parity", "Bridge / Kodi fingerprint parity"],
       [
-        "    name: Immutable production image / PostgreSQL + Redis + private S3",
+        "container-smoke",
         "Immutable production image / PostgreSQL + Redis + private S3",
       ],
     ]) {
-      if (exactLineOccurrences(jobLine) === 1) emittedContexts.push(context);
+      if (jobs[jobId] && jobs[jobId].name === context) emittedContexts.push(context);
     }
 
-    const redisTemplate = "    name: Redis ${{ matrix.redis_major }} / 48 live contracts";
-    const redisMajors = [
-      ...workflow.matchAll(/^          - redis_major: "([^"]+)"$/gm),
-    ].map((match) => match[1]);
+    const redisTemplate = "Redis ${{ matrix.redis_major }} / 48 live contracts";
+    const redisInclude = jobs["redis-live"]?.strategy?.matrix?.include;
+    const redisMajors = Array.isArray(redisInclude)
+      ? redisInclude.map((entry) =>
+          entry && typeof entry === "object" && !Array.isArray(entry)
+            ? entry.redis_major
+            : null
+        )
+      : [];
     if (
-      exactLineOccurrences(redisTemplate) === 1 &&
+      jobs["redis-live"]?.name === redisTemplate &&
       JSON.stringify(redisMajors) === JSON.stringify(["7", "8"])
     ) {
       emittedContexts.push(...redisMajors.map((major) => `Redis ${major} / 48 live contracts`));
     }
 
     const postgresTemplate =
-      "    name: PostgreSQL ${{ matrix.postgres_major }} / 22 live storage contracts";
-    const postgresMajors = [
-      ...workflow.matchAll(/^          - postgres_major: "([^"]+)"$/gm),
-    ].map((match) => match[1]);
+      "PostgreSQL ${{ matrix.postgres_major }} / 22 live storage contracts";
+    const postgresInclude = jobs["postgres-live"]?.strategy?.matrix?.include;
+    const postgresMajors = Array.isArray(postgresInclude)
+      ? postgresInclude.map((entry) =>
+          entry && typeof entry === "object" && !Array.isArray(entry)
+            ? entry.postgres_major
+            : null
+        )
+      : [];
     if (
-      exactLineOccurrences(postgresTemplate) === 1 &&
+      jobs["postgres-live"]?.name === postgresTemplate &&
       JSON.stringify(postgresMajors) === JSON.stringify(["16", "17"])
     ) {
       emittedContexts.push(
@@ -1132,7 +1185,7 @@ function validatePublicationGate(documents) {
         ".github/workflows/fly-deploy.yml: emitted check contexts must exactly match release gates"
       );
     }
-    if (exactLineOccurrences(`    name: ${DEPLOY_CHECK_CONTEXT}`) !== 1) {
+    if (!jobs.deploy || jobs.deploy.name !== DEPLOY_CHECK_CONTEXT) {
       violations.push(
         ".github/workflows/fly-deploy.yml: deployment check context must appear exactly once"
       );
@@ -1805,6 +1858,7 @@ module.exports = {
   isAllowedPackagePath,
   materializeSelectedIndex,
   parseGitIndexEntries,
+  parseWorkflowReleaseMetadata,
   readIndexedFileBytes,
   runPolicy,
   scanCredentialBytes,

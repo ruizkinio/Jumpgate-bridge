@@ -959,6 +959,24 @@ test("publication gate binds the canonical repository and private advisory chann
     true
   );
 
+  const spoofedWorkflowContext = {
+    ...documents,
+    ".github/workflows/fly-deploy.yml": documents[
+      ".github/workflows/fly-deploy.yml"
+    ]
+      .replace("    name: Quality / Node 24", "    name: Quality / Node changed")
+      .replace(
+        "env:\n  NODE_VERSION:",
+        "env:\n  SPOOFED_CONTEXT: |\n    name: Quality / Node 24\n  NODE_VERSION:"
+      ),
+  };
+  assert.equal(
+    validatePublicationGate(spoofedWorkflowContext).some((value) =>
+      value.includes("emitted check contexts must exactly match")
+    ),
+    true
+  );
+
   const missingRequiredContext = {
     ...documents,
     "scripts/ci/RELEASE_GATES.md": documents["scripts/ci/RELEASE_GATES.md"].replace(
