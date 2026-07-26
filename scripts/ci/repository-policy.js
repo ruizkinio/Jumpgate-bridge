@@ -1085,7 +1085,8 @@ function validatePublicationGate(documents) {
       );
     }
 
-    const occurrences = (value) => workflow.split(value).length - 1;
+    const exactLineOccurrences = (value) =>
+      workflowLines.filter((line) => line === value).length;
     const emittedContexts = [];
     for (const [jobLine, context] of [
       ["    name: Quality / Node 24", "Quality / Node 24"],
@@ -1095,7 +1096,7 @@ function validatePublicationGate(documents) {
         "Immutable production image / PostgreSQL + Redis + private S3",
       ],
     ]) {
-      if (occurrences(jobLine) === 1) emittedContexts.push(context);
+      if (exactLineOccurrences(jobLine) === 1) emittedContexts.push(context);
     }
 
     const redisTemplate = "    name: Redis ${{ matrix.redis_major }} / 48 live contracts";
@@ -1103,7 +1104,7 @@ function validatePublicationGate(documents) {
       ...workflow.matchAll(/^          - redis_major: "([^"]+)"$/gm),
     ].map((match) => match[1]);
     if (
-      occurrences(redisTemplate) === 1 &&
+      exactLineOccurrences(redisTemplate) === 1 &&
       JSON.stringify(redisMajors) === JSON.stringify(["7", "8"])
     ) {
       emittedContexts.push(...redisMajors.map((major) => `Redis ${major} / 48 live contracts`));
@@ -1115,7 +1116,7 @@ function validatePublicationGate(documents) {
       ...workflow.matchAll(/^          - postgres_major: "([^"]+)"$/gm),
     ].map((match) => match[1]);
     if (
-      occurrences(postgresTemplate) === 1 &&
+      exactLineOccurrences(postgresTemplate) === 1 &&
       JSON.stringify(postgresMajors) === JSON.stringify(["16", "17"])
     ) {
       emittedContexts.push(
@@ -1131,7 +1132,7 @@ function validatePublicationGate(documents) {
         ".github/workflows/fly-deploy.yml: emitted check contexts must exactly match release gates"
       );
     }
-    if (occurrences(`    name: ${DEPLOY_CHECK_CONTEXT}`) !== 1) {
+    if (exactLineOccurrences(`    name: ${DEPLOY_CHECK_CONTEXT}`) !== 1) {
       violations.push(
         ".github/workflows/fly-deploy.yml: deployment check context must appear exactly once"
       );

@@ -921,6 +921,44 @@ test("publication gate binds the canonical repository and private advisory chann
     true
   );
 
+  for (const exactJobLine of [
+    "    name: Quality / Node 24",
+    "    name: Bridge / Kodi fingerprint parity",
+    "    name: Immutable production image / PostgreSQL + Redis + private S3",
+    "    name: Redis ${{ matrix.redis_major }} / 48 live contracts",
+    "    name: PostgreSQL ${{ matrix.postgres_major }} / 22 live storage contracts",
+  ]) {
+    const suffixedWorkflowContext = {
+      ...documents,
+      ".github/workflows/fly-deploy.yml": documents[
+        ".github/workflows/fly-deploy.yml"
+      ].replace(exactJobLine, exactJobLine + " renamed"),
+    };
+    assert.equal(
+      validatePublicationGate(suffixedWorkflowContext).some((value) =>
+        value.includes("emitted check contexts must exactly match")
+      ),
+      true,
+      exactJobLine
+    );
+  }
+
+  const suffixedDeployContext = {
+    ...documents,
+    ".github/workflows/fly-deploy.yml": documents[
+      ".github/workflows/fly-deploy.yml"
+    ].replace(
+      `    name: ${DEPLOY_CHECK_CONTEXT}`,
+      `    name: ${DEPLOY_CHECK_CONTEXT} renamed`
+    ),
+  };
+  assert.equal(
+    validatePublicationGate(suffixedDeployContext).some((value) =>
+      value.includes("deployment check context must appear exactly once")
+    ),
+    true
+  );
+
   const missingRequiredContext = {
     ...documents,
     "scripts/ci/RELEASE_GATES.md": documents["scripts/ci/RELEASE_GATES.md"].replace(
