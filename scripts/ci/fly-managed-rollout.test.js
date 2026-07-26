@@ -10,12 +10,15 @@ const {
   assertDeployable,
   attestRepeatedly,
   CANDIDATE_PROTOCOL_STATUS_COMMAND,
+  convergeFleet,
   desiredStateForPhase,
   loadDesiredState,
   parseCandidateProtocolStatusOutput,
   planWriterProtocolRollout,
   PROTOCOL_STATUS_MARKER,
   readCandidateWriterProtocolStatus,
+  startMachine,
+  validateConvergenceSample,
   validateFleetSample,
 } = require("./fly-managed-rollout");
 
@@ -24,6 +27,9 @@ const CONFIG = path.join(ROOT, "fly.toml");
 const IMAGE =
   "registry.fly.io/jumpgate-bridge:git-" + "a".repeat(40) + "@sha256:" + "b".repeat(64);
 const DIGEST = "sha256:" + "b".repeat(64);
+const MACHINE_A = "0123456789abcd";
+const MACHINE_B = "1123456789abcd";
+const MACHINE_C = "2123456789abcd";
 
 function protocolStatus(state, version) {
   return {
@@ -41,19 +47,19 @@ function machine(id, desired, overrides = {}) {
     cordoned: false,
     config: {
       image: IMAGE,
-      env: { ...desired.env },
+      env: { ...desired.env, FLY_PROCESS_GROUP: desired.processGroup },
       guest: {
         cpu_kind: desired.guest.cpuKind,
         cpus: desired.guest.cpus,
         memory_mb: desired.guest.memoryMb,
       },
-      metadata: { fly_process_group: "app" },
+      metadata: { fly_process_group: desired.processGroup },
       services: [{
         protocol: "tcp",
         internal_port: 7515,
         min_machines_running: 2,
         autostart: true,
-        autostop: "stop",
+        autostop: true,
         ports: [
           { port: 80, handlers: ["http"], force_https: true },
           { port: 443, handlers: ["tls", "http"] },
@@ -87,6 +93,7 @@ test("checked-in desired state is exact and deployable after live storage attest
     "node scripts/production-release-protocols.js apply-env"
   );
   assert.equal(desired.minMachinesRunning, 2);
+  assert.equal(desired.autoStop, "stop");
   assert.equal(desired.permanentErasureMode, "tigris-version-purge-v1");
   assert.equal(assertDeployable(desired), desired);
 
@@ -105,39 +112,73 @@ test("checked-in desired state is exact and deployable after live storage attest
   );
 });
 
+test("canonical Fly-derived environment and runtime stop mapping remain exact", () => {
+  const desired = loadDesiredState(CONFIG, "jumpgate-bridge");
+  const sample = [machine(MACHINE_A, desired), machine(MACHINE_B, desired)];
+  for (const candidate of sample) {
+    candidate.config.env.PRIMARY_REGION = desired.primaryRegion;
+    candidate.config.env.FLY_PROCESS_GROUP = desired.processGroup;
+    candidate.config.services[0].autostop = true;
+  }
+  assert.deepEqual(validateFleetSample(sample, desired, IMAGE), [MACHINE_A, MACHINE_B]);
+
+  const wrongDerived = machine(MACHINE_B, desired);
+  wrongDerived.config.env.FLY_PROCESS_GROUP = "worker";
+  assert.throws(
+    () => validateFleetSample([machine(MACHINE_A, desired), wrongDerived], desired, IMAGE),
+    /derived process group/
+  );
+
+  const missingDerived = machine(MACHINE_B, desired);
+  delete missingDerived.config.env.FLY_PROCESS_GROUP;
+  assert.throws(
+    () => validateFleetSample([machine(MACHINE_A, desired), missingDerived], desired, IMAGE),
+    /derived process group/
+  );
+
+  for (const invalid of [false, "stop", "suspend", "true", "STOP"]) {
+    const wrongAutostop = machine(MACHINE_B, desired);
+    wrongAutostop.config.services[0].autostop = invalid;
+    assert.throws(
+      () => validateFleetSample([machine(MACHINE_A, desired), wrongAutostop], desired, IMAGE),
+      /auto-stop policy/
+    );
+  }
+});
+
 test("fleet attestation requires two exact healthy serving Machines", () => {
   const desired = loadDesiredState(CONFIG, "jumpgate-bridge");
-  const sample = [machine("machine-a", desired), machine("machine-b", desired)];
-  assert.deepEqual(validateFleetSample(sample, desired, IMAGE), ["machine-a", "machine-b"]);
+  const sample = [machine(MACHINE_A, desired), machine(MACHINE_B, desired)];
+  assert.deepEqual(validateFleetSample(sample, desired, IMAGE), [MACHINE_A, MACHINE_B]);
   assert.throws(
     () => validateFleetSample(sample.slice(0, 1), desired, IMAGE),
     /exactly two serving app Machines/
   );
   assert.throws(
-    () => validateFleetSample([...sample, machine("machine-c", desired)], desired, IMAGE),
+    () => validateFleetSample([...sample, machine(MACHINE_C, desired)], desired, IMAGE),
     /exactly two serving app Machines/
   );
   assert.throws(
     () => validateFleetSample([
       ...sample,
-      machine("machine-c", desired, { state: "stopped" }),
+      machine(MACHINE_C, desired, { state: "stopped" }),
     ], desired, IMAGE),
     /non-serving extra Machine/
   );
-  const foreignService = machine("machine-c", desired);
+  const foreignService = machine(MACHINE_C, desired);
   foreignService.config.metadata.fly_process_group = "worker";
   assert.throws(
     () => validateFleetSample([...sample, foreignService], desired, IMAGE),
     /outside the managed app process group/
   );
-  const unknownProcess = machine("machine-c", desired);
+  const unknownProcess = machine(MACHINE_C, desired);
   delete unknownProcess.config.metadata.fly_process_group;
   unknownProcess.config.services = [];
   assert.throws(
     () => validateFleetSample([...sample, unknownProcess], desired, IMAGE),
     /unexpected Machine process group/
   );
-  const serviceLessApp = machine("machine-c", desired);
+  const serviceLessApp = machine(MACHINE_C, desired);
   serviceLessApp.config.services = [];
   assert.throws(
     () => validateFleetSample([...sample, serviceLessApp], desired, IMAGE),
@@ -146,52 +187,52 @@ test("fleet attestation requires two exact healthy serving Machines", () => {
   assert.deepEqual(
     validateFleetSample([
       ...sample,
-      { id: "release-command", state: "destroyed" },
+      { id: MACHINE_C, state: "destroyed" },
     ], desired, IMAGE),
-    ["machine-a", "machine-b"]
+    [MACHINE_A, MACHINE_B]
   );
   assert.throws(
     () => validateFleetSample([
-      machine("machine-a", desired),
-      machine("machine-b", desired, { image_ref: { digest: "sha256:" + "c".repeat(64) } }),
+      machine(MACHINE_A, desired),
+      machine(MACHINE_B, desired, { image_ref: { digest: "sha256:" + "c".repeat(64) } }),
     ], desired, IMAGE),
     /immutable image digest/
   );
   assert.throws(
     () => validateFleetSample([
-      machine("machine-a", desired),
-      machine("machine-b", desired, { checks: [{ name: "servicecheck-00-http-7515", status: "critical" }] }),
+      machine(MACHINE_A, desired),
+      machine(MACHINE_B, desired, { checks: [{ name: "servicecheck-00-http-7515", status: "critical" }] }),
     ], desired, IMAGE),
     /service check/
   );
-  const extraEnv = machine("machine-b", desired);
+  const extraEnv = machine(MACHINE_B, desired);
   extraEnv.config.env.LEGACY_ENV = "must-not-survive-managed-deploy";
   assert.throws(
-    () => validateFleetSample([machine("machine-a", desired), extraEnv], desired, IMAGE),
+    () => validateFleetSample([machine(MACHINE_A, desired), extraEnv], desired, IMAGE),
     /outside checked-in Fly configuration/
   );
-  const wrongGuest = machine("machine-b", desired);
+  const wrongGuest = machine(MACHINE_B, desired);
   wrongGuest.config.guest.memory_mb = 512;
   assert.throws(
-    () => validateFleetSample([machine("machine-a", desired), wrongGuest], desired, IMAGE),
+    () => validateFleetSample([machine(MACHINE_A, desired), wrongGuest], desired, IMAGE),
     /Machine memory/
   );
-  const legacyLifecycle = machine("machine-b", desired);
-  legacyLifecycle.config.services[0].autostop = true;
+  const legacyLifecycle = machine(MACHINE_B, desired);
+  legacyLifecycle.config.services[0].autostop = false;
   assert.throws(
-    () => validateFleetSample([machine("machine-a", desired), legacyLifecycle], desired, IMAGE),
+    () => validateFleetSample([machine(MACHINE_A, desired), legacyLifecycle], desired, IMAGE),
     /auto-stop policy/
   );
-  const wrongHandlers = machine("machine-b", desired);
+  const wrongHandlers = machine(MACHINE_B, desired);
   wrongHandlers.config.services[0].ports[1].handlers = ["http"];
   assert.throws(
-    () => validateFleetSample([machine("machine-a", desired), wrongHandlers], desired, IMAGE),
+    () => validateFleetSample([machine(MACHINE_A, desired), wrongHandlers], desired, IMAGE),
     /public ports/
   );
-  const weakCheck = machine("machine-b", desired);
+  const weakCheck = machine(MACHINE_B, desired);
   weakCheck.config.services[0].checks[0].interval = "60s";
   assert.throws(
-    () => validateFleetSample([machine("machine-a", desired), weakCheck], desired, IMAGE),
+    () => validateFleetSample([machine(MACHINE_A, desired), weakCheck], desired, IMAGE),
     /check interval/
   );
 });
@@ -200,14 +241,14 @@ test("phase-specific attestation cannot confuse transition and final v6 fleets",
   const desired = loadDesiredState(CONFIG, "jumpgate-bridge");
   const transition = desiredStateForPhase(desired, "transition");
   const final = desiredStateForPhase(desired, "v6");
-  const transitionSample = [machine("machine-a", transition), machine("machine-b", transition)];
-  const finalSample = [machine("machine-a", final), machine("machine-b", final)];
+  const transitionSample = [machine(MACHINE_A, transition), machine(MACHINE_B, transition)];
+  const finalSample = [machine(MACHINE_A, final), machine(MACHINE_B, final)];
 
   assert.deepEqual(
     validateFleetSample(transitionSample, transition, IMAGE),
-    ["machine-a", "machine-b"]
+    [MACHINE_A, MACHINE_B]
   );
-  assert.deepEqual(validateFleetSample(finalSample, final, IMAGE), ["machine-a", "machine-b"]);
+  assert.deepEqual(validateFleetSample(finalSample, final, IMAGE), [MACHINE_A, MACHINE_B]);
   assert.throws(
     () => validateFleetSample(transitionSample, final, IMAGE),
     /does not match checked-in desired state/
@@ -236,21 +277,21 @@ test("managed attestation samples service and external readiness across interval
     delayMs: 1,
     sample: async () => {
       samples += 1;
-      return [machine("machine-a", desired), machine("machine-b", desired)];
+      return [machine(MACHINE_A, desired), machine(MACHINE_B, desired)];
     },
     externalProbe: async () => {
       probes += 1;
     },
     protocolProbe: async (machineId) => {
       protocolProbes += 1;
-      assert.equal(machineId, "machine-a");
+      assert.equal(machineId, MACHINE_A);
       return protocolStatus("ready", "6");
     },
     sleep: async () => {
       sleeps += 1;
     },
   });
-  assert.deepEqual(result.machineIds, ["machine-a", "machine-b"]);
+  assert.deepEqual(result.machineIds, [MACHINE_A, MACHINE_B]);
   assert.equal(result.intervals, 3);
   assert.equal(result.phase, "v6");
   assert.equal(result.protocolVersion, "6");
@@ -258,6 +299,256 @@ test("managed attestation samples service and external readiness across interval
   assert.equal(probes, 3);
   assert.equal(protocolProbes, 3);
   assert.equal(sleeps, 2);
+});
+
+test("convergence starts only the exact stopped Machine and polls to passing", async () => {
+  const desired = loadDesiredState(CONFIG, "jumpgate-bridge");
+  const transition = desiredStateForPhase(desired, "transition");
+  const stopped = machine(MACHINE_B, transition, { state: "stopped" });
+  const warming = machine(MACHINE_B, transition, {
+    checks: [{ name: "servicecheck-00-http-7515", status: "warning" }],
+  });
+  const samples = [
+    [machine(MACHINE_A, transition), stopped],
+    [machine(MACHINE_A, transition), warming],
+    [machine(MACHINE_A, transition), machine(MACHINE_B, transition)],
+  ];
+  const invocations = [];
+  let sleeps = 0;
+  const result = await convergeFleet({
+    desired,
+    phase: "transition",
+    image: IMAGE,
+    polls: 3,
+    delayMs: 1,
+    sample: async () => samples.shift(),
+    startMachine: (machineId) => startMachine(
+      "flyctl-test",
+      desired.app,
+      machineId,
+      {
+        execFile: async (file, args, options) => {
+          invocations.push({ file, args, options });
+          return { stdout: "started", stderr: "" };
+        },
+      }
+    ),
+    sleep: async () => {
+      sleeps += 1;
+    },
+  });
+
+  assert.deepEqual(result.machineIds, [MACHINE_A, MACHINE_B]);
+  assert.deepEqual(result.startedIds, [MACHINE_B]);
+  assert.equal(result.phase, "transition");
+  assert.equal(invocations.length, 1);
+  assert.equal(invocations[0].file, "flyctl-test");
+  assert.deepEqual(invocations[0].args, [
+    "machine",
+    "start",
+    MACHINE_B,
+    "--app",
+    desired.app,
+  ]);
+  assert.equal(invocations[0].options.maxBuffer > 0, true);
+  assert.equal(invocations[0].options.timeout > 0, true);
+  assert.equal(invocations[0].options.timeout <= 60_000, true);
+  assert.equal(sleeps, 1);
+});
+
+test("already healthy convergence is mutation-free", async () => {
+  const desired = loadDesiredState(CONFIG, "jumpgate-bridge");
+  const healthy = [machine(MACHINE_A, desired), machine(MACHINE_B, desired)];
+  for (const candidate of healthy) {
+    candidate.config.env.PRIMARY_REGION = desired.primaryRegion;
+    candidate.config.env.FLY_PROCESS_GROUP = desired.processGroup;
+  }
+  let samples = 0;
+  let starts = 0;
+  let sleeps = 0;
+  const result = await convergeFleet({
+    desired,
+    phase: "v6",
+    image: IMAGE,
+    polls: 2,
+    delayMs: 0,
+    sample: async () => {
+      samples += 1;
+      return healthy;
+    },
+    startMachine: async () => {
+      starts += 1;
+    },
+    sleep: async () => {
+      sleeps += 1;
+    },
+  });
+
+  assert.deepEqual(result.startedIds, []);
+  assert.equal(samples, 1);
+  assert.equal(starts, 0);
+  assert.equal(sleeps, 0);
+  assert.deepEqual(
+    validateConvergenceSample(healthy, desired, IMAGE).map((candidate) => candidate.id),
+    [MACHINE_A, MACHINE_B]
+  );
+});
+
+test("convergence rejects ambiguous or drifted candidates before mutation", async () => {
+  const desired = loadDesiredState(CONFIG, "jumpgate-bridge");
+  const cases = [
+    ["extra", (fleet) => fleet.push(machine(MACHINE_C, desired))],
+    ["wrong image", (fleet) => { fleet[1].config.image = IMAGE.replace(/b+$/, "c".repeat(64)); }],
+    ["wrong digest", (fleet) => { fleet[1].image_ref.digest = "sha256:" + "c".repeat(64); }],
+    ["wrong guest config", (fleet) => { fleet[1].config.guest.memory_mb = 512; }],
+    ["wrong service config", (fleet) => { fleet[1].config.services[0].checks[0].timeout = "6s"; }],
+    ["wrong process", (fleet) => { fleet[1].config.metadata.fly_process_group = "worker"; }],
+    ["ambiguous process", (fleet) => { fleet[1].config.metadata.process_group = "worker"; }],
+    ["cordoned", (fleet) => { fleet[1].cordoned = true; }],
+    ["pending", (fleet) => { fleet[1].state = "pending"; }],
+    ["suspended", (fleet) => { fleet[1].state = "suspended"; }],
+    ["missing health result", (fleet) => { fleet[1].checks = []; }],
+    ["invalid health status", (fleet) => { fleet[1].checks[0].status = "pending"; }],
+    ["malformed id", (fleet) => { fleet[1].id = "machine-b"; }],
+    ["duplicate id", (fleet) => { fleet[1].id = MACHINE_A; }],
+    ["wrong phase", (fleet) => {
+      fleet[1].config.env.JUMPGATE_REDIS_PLAYBACK_CLAIM_ROLLOUT_MODE = "transition";
+    }],
+  ];
+
+  for (const [name, mutate] of cases) {
+    const fleet = [
+      machine(MACHINE_A, desired),
+      machine(MACHINE_B, desired, { state: "stopped" }),
+    ];
+    mutate(fleet);
+    let starts = 0;
+    await assert.rejects(
+      convergeFleet({
+        desired,
+        phase: "v6",
+        image: IMAGE,
+        polls: 2,
+        delayMs: 0,
+        sample: async () => fleet,
+        startMachine: async () => {
+          starts += 1;
+        },
+        sleep: async () => {},
+      }),
+      Error,
+      name
+    );
+    assert.equal(starts, 0, name);
+  }
+});
+
+test("convergence start failure is fail-closed and secret-safe", async () => {
+  const desired = loadDesiredState(CONFIG, "jumpgate-bridge");
+  const secret = "fly-secret-must-not-escape";
+  await assert.rejects(
+    convergeFleet({
+      desired,
+      phase: "v6",
+      image: IMAGE,
+      polls: 2,
+      delayMs: 0,
+      sample: async () => [
+        machine(MACHINE_A, desired),
+        machine(MACHINE_B, desired, { state: "stopped" }),
+      ],
+      startMachine: (machineId) => startMachine(
+        "flyctl-test",
+        desired.app,
+        machineId,
+        { execFile: async () => { throw new Error(secret); } }
+      ),
+      sleep: async () => {},
+    }),
+    (error) => {
+      assert.equal(error.code, "fly_convergence_start_failed");
+      assert.equal(error.message.includes(secret), false);
+      return true;
+    }
+  );
+});
+
+test("convergence timeout is bounded without repeated mutation", async () => {
+  const desired = loadDesiredState(CONFIG, "jumpgate-bridge");
+  let samples = 0;
+  let starts = 0;
+  let sleeps = 0;
+  await assert.rejects(
+    convergeFleet({
+      desired,
+      phase: "v6",
+      image: IMAGE,
+      polls: 2,
+      delayMs: 1,
+      sample: async () => {
+        samples += 1;
+        return [
+          machine(MACHINE_A, desired),
+          machine(MACHINE_B, desired, { state: "stopped" }),
+        ];
+      },
+      startMachine: async (machineId) => {
+        assert.equal(machineId, MACHINE_B);
+        starts += 1;
+      },
+      sleep: async () => {
+        sleeps += 1;
+      },
+    }),
+    (error) => error.code === "fly_convergence_timeout"
+  );
+  assert.equal(samples, 3);
+  assert.equal(starts, 1);
+  assert.equal(sleeps, 1);
+});
+
+test("identity or configuration drift while polling is not retried", async () => {
+  const desired = loadDesiredState(CONFIG, "jumpgate-bridge");
+  for (const drift of ["identity", "digest"]) {
+    let samples = 0;
+    let starts = 0;
+    let sleeps = 0;
+    await assert.rejects(
+      convergeFleet({
+        desired,
+        phase: "v6",
+        image: IMAGE,
+        polls: 3,
+        delayMs: 1,
+        sample: async () => {
+          samples += 1;
+          if (samples === 1) {
+            return [
+              machine(MACHINE_A, desired),
+              machine(MACHINE_B, desired, { state: "stopped" }),
+            ];
+          }
+          if (drift === "identity") {
+            return [machine(MACHINE_A, desired), machine(MACHINE_C, desired)];
+          }
+          const changed = machine(MACHINE_B, desired);
+          changed.image_ref.digest = "sha256:" + "c".repeat(64);
+          return [machine(MACHINE_A, desired), changed];
+        },
+        startMachine: async () => {
+          starts += 1;
+        },
+        sleep: async () => {
+          sleeps += 1;
+        },
+      }),
+      Error,
+      drift
+    );
+    assert.equal(samples, 2, drift);
+    assert.equal(starts, 1, drift);
+    assert.equal(sleeps, 0, drift);
+  }
 });
 
 test("attestation requires the exact Redis protocol at each rollout boundary", async () => {
@@ -288,7 +579,7 @@ test("attestation requires the exact Redis protocol at each rollout boundary", a
       delayMs: 0,
       sample: async () => {
         const transition = desiredStateForPhase(desired, "transition");
-        return [machine("machine-a", transition), machine("machine-b", transition)];
+        return [machine(MACHINE_A, transition), machine(MACHINE_B, transition)];
       },
       externalProbe: async () => {},
       protocolProbe: async () => protocolStatus("ready", "6"),
@@ -446,11 +737,25 @@ test("workflow probes first, conditionally transitions, and always finishes on v
   const transitionDeploy = workflow.indexOf(
     "--env JUMPGATE_REDIS_PLAYBACK_CLAIM_ROLLOUT_MODE=transition"
   );
-  const transitionAttestation = workflow.indexOf("--phase=transition");
+  const transitionConvergence = workflow.indexOf(
+    "fly-managed-rollout.js converge",
+    transitionDeploy
+  );
+  const transitionAttestation = workflow.indexOf(
+    "fly-managed-rollout.js attest",
+    transitionConvergence
+  );
   const finalDeploy = workflow.indexOf(
     "--env JUMPGATE_REDIS_PLAYBACK_CLAIM_ROLLOUT_MODE=v6"
   );
-  const finalAttestation = workflow.indexOf("--phase=v6");
+  const finalConvergence = workflow.indexOf(
+    "fly-managed-rollout.js converge",
+    finalDeploy
+  );
+  const finalAttestation = workflow.indexOf(
+    "fly-managed-rollout.js attest",
+    finalConvergence
+  );
 
   assert.match(workflow, /fly-managed-rollout\.js validate/);
   assert.match(workflow, /FLYCTL_VERSION: "0\.4\.69-jumpgate-digest4"/);
@@ -481,20 +786,26 @@ test("workflow probes first, conditionally transitions, and always finishes on v
   assert.doesNotMatch(workflow, /github\.com\/superfly\/flyctl\/releases\/download/);
   assert.ok(candidatePlan > -1);
   assert.ok(transitionDeploy > candidatePlan);
-  assert.ok(transitionAttestation > transitionDeploy);
+  assert.ok(transitionConvergence > transitionDeploy);
+  assert.ok(transitionAttestation > transitionConvergence);
   assert.ok(finalDeploy > transitionAttestation);
-  assert.ok(finalAttestation > finalDeploy);
+  assert.ok(finalConvergence > finalDeploy);
+  assert.ok(finalAttestation > finalConvergence);
   assert.equal(
     (workflow.match(/if: steps\.writer-protocol\.outputs\.transition_required == 'true'/g) || [])
       .length,
-    2
+    3
   );
   assert.match(
     workflow,
     /fly-managed-rollout\.js plan[\s\S]*--image="\$IMMUTABLE_IMAGE_REF"[\s\S]*>> "\$GITHUB_OUTPUT"/
   );
   assert.equal((workflow.match(/--image "\$IMMUTABLE_IMAGE_REF"/g) || []).length, 2);
+  assert.equal((workflow.match(/fly-managed-rollout\.js converge/g) || []).length, 2);
   assert.equal((workflow.match(/fly-managed-rollout\.js attest/g) || []).length, 2);
+  assert.equal((workflow.match(/--image="\$IMMUTABLE_IMAGE_REF"/g) || []).length, 5);
+  assert.equal((workflow.match(/--phase=transition/g) || []).length, 2);
+  assert.equal((workflow.match(/--phase=v6/g) || []).length, 2);
   assert.match(
     workflow,
     /test\/provider-snapshot-recovery-integration\.test\.js\s+test\/playback-claim-writer-protocol-redis\.test\.js/

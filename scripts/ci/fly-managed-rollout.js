@@ -10,6 +10,7 @@ const { parse } = require("smol-toml");
 
 const execFileAsync = promisify(execFile);
 const IMAGE_PATTERN = /^registry\.fly\.io\/([a-z0-9-]+):git-([a-f0-9]{40})@(sha256:[a-f0-9]{64})$/;
+const MACHINE_ID_PATTERN = /^[a-f0-9]{14}$/;
 const CLAIM_WRITER_ROLLOUT_ENV = "JUMPGATE_REDIS_PLAYBACK_CLAIM_ROLLOUT_MODE";
 const RELEASE_COMMAND = "node scripts/production-release-protocols.js apply-env";
 const PROTOCOL_STATUS_COMMAND = "node scripts/playback-claim-writer-protocol.js status";
@@ -32,7 +33,12 @@ const REQUIRED_ENV = Object.freeze({
 });
 const DEFAULT_INTERVALS = 3;
 const DEFAULT_DELAY_MS = 10_000;
+const DEFAULT_CONVERGENCE_POLLS = 24;
+const DEFAULT_CONVERGENCE_DELAY_MS = 5_000;
 const MAX_MACHINE_LIST_BYTES = 4 * 1024 * 1024;
+const MAX_MACHINE_COMMAND_BYTES = 64 * 1024;
+const MACHINE_LIST_TIMEOUT_MS = 15_000;
+const MACHINE_START_TIMEOUT_MS = 60_000;
 const MAX_PROTOCOL_STATUS_BYTES = 16 * 1024;
 const PROTOCOL_PROBE_MACHINE_LIFETIME_SECONDS = 300;
 const PROTOCOL_PROBE_TIMEOUT_MS = 4 * 60 * 1000;
@@ -60,6 +66,14 @@ function exactInteger(value, name, minimum, maximum) {
   requireCondition(
     Number.isSafeInteger(value) && value >= minimum && value <= maximum,
     name + " is invalid"
+  );
+  return value;
+}
+
+function exactMachineId(value) {
+  requireCondition(
+    typeof value === "string" && MACHINE_ID_PATTERN.test(value),
+    "Fly Machine id is invalid"
   );
   return value;
 }
@@ -209,7 +223,15 @@ function parseImage(image, app) {
 function machineProcessGroup(machine) {
   const metadata = machine.config?.metadata;
   if (!isRecord(metadata)) return null;
-  return metadata.fly_process_group ?? metadata.process_group ?? null;
+  const hasFlyProcessGroup = Object.prototype.hasOwnProperty.call(metadata, "fly_process_group");
+  const hasProcessGroup = Object.prototype.hasOwnProperty.call(metadata, "process_group");
+  if (hasFlyProcessGroup && hasProcessGroup) {
+    if (metadata.fly_process_group !== metadata.process_group) return null;
+    return metadata.fly_process_group;
+  }
+  if (hasFlyProcessGroup) return metadata.fly_process_group;
+  if (hasProcessGroup) return metadata.process_group;
+  return null;
 }
 
 function collectServingMachines(machines, expectedProcessGroup) {
@@ -222,10 +244,7 @@ function collectServingMachines(machines, expectedProcessGroup) {
   const serving = [];
   for (const machine of machines) {
     requireCondition(isRecord(machine), "Fly Machine is invalid");
-    requireCondition(
-      typeof machine.id === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(machine.id),
-      "Fly Machine id is invalid"
-    );
+    exactMachineId(machine.id);
     requireCondition(!seen.has(machine.id), "Fly Machine sample contains duplicate ids");
     seen.add(machine.id);
     if (machine.state === "destroyed") continue;
@@ -269,6 +288,12 @@ function assertMachineEnv(machine, desired) {
     );
     delete actual.PRIMARY_REGION;
   }
+  requireCondition(
+    Object.prototype.hasOwnProperty.call(actual, "FLY_PROCESS_GROUP") &&
+      actual.FLY_PROCESS_GROUP === desired.processGroup,
+    "Machine derived process group is invalid"
+  );
+  delete actual.FLY_PROCESS_GROUP;
   requireCondition(
     JSON.stringify(Object.keys(actual).sort()) ===
       JSON.stringify(Object.keys(desired.env).sort()),
@@ -326,7 +351,10 @@ function assertMachineService(machine, desired) {
     "Machine service minimum fleet is invalid"
   );
   requireCondition(service.autostart === desired.autoStart, "Machine auto-start policy is invalid");
-  requireCondition(service.autostop === desired.autoStop, "Machine auto-stop policy is invalid");
+  requireCondition(
+    desired.autoStop === "stop" && service.autostop === true,
+    "Machine auto-stop policy is invalid"
+  );
   servicePorts(service, desired);
   requireCondition(
     Array.isArray(service.checks) && service.checks.length === desired.checks.length,
@@ -352,7 +380,7 @@ function assertMachineService(machine, desired) {
   }
 }
 
-function assertServiceHealth(machine, desired) {
+function machineServiceHealthPassing(machine, desired) {
   requireCondition(
     Array.isArray(machine.checks) && machine.checks.length === desired.checks.length,
     "Machine service check result is missing"
@@ -369,26 +397,87 @@ function assertServiceHealth(machine, desired) {
     checksByName.set(check.name, check.status);
   }
   for (const name of expectedNames) {
-    requireCondition(checksByName.get(name) === "passing", "Machine service check is not passing");
+    const status = checksByName.get(name);
+    requireCondition(
+      status === "passing" || status === "warning" || status === "critical",
+      "Machine service check result status is invalid"
+    );
   }
+  return expectedNames.every((name) => checksByName.get(name) === "passing");
+}
+
+function assertServiceHealth(machine, desired) {
+  requireCondition(machineServiceHealthPassing(machine, desired), "Machine service check is not passing");
+}
+
+function assertMachineDefinition(machine, desired, expectedImage) {
+  requireCondition(machine.cordoned === false, "serving Machine is cordoned");
+  requireCondition(machine.config.image === expectedImage.value, "Machine immutable image differs");
+  requireCondition(
+    machine.image_ref?.digest === expectedImage.digest,
+    "Machine immutable image digest differs"
+  );
+  assertMachineEnv(machine, desired);
+  assertMachineGuest(machine, desired);
+  assertMachineService(machine, desired);
 }
 
 function validateFleetSample(machines, desired, image) {
   const expectedImage = parseImage(image, desired.app);
   const serving = collectServingMachines(machines, desired.processGroup);
   for (const machine of serving) {
-    requireCondition(machine.cordoned === false, "serving Machine is cordoned");
-    requireCondition(machine.config.image === expectedImage.value, "Machine immutable image differs");
-    requireCondition(
-      machine.image_ref?.digest === expectedImage.digest,
-      "Machine immutable image digest differs"
-    );
-    assertMachineEnv(machine, desired);
-    assertMachineGuest(machine, desired);
-    assertMachineService(machine, desired);
+    assertMachineDefinition(machine, desired, expectedImage);
     assertServiceHealth(machine, desired);
   }
   return serving.map((machine) => machine.id);
+}
+
+function collectConvergenceMachines(machines, expectedProcessGroup) {
+  requireCondition(Array.isArray(machines), "Fly Machine sample is invalid");
+  requireCondition(
+    typeof expectedProcessGroup === "string" && expectedProcessGroup.length > 0,
+    "expected Fly process group is invalid"
+  );
+  const seen = new Set();
+  const candidates = [];
+  for (const machine of machines) {
+    requireCondition(isRecord(machine), "Fly Machine is invalid");
+    exactMachineId(machine.id);
+    requireCondition(!seen.has(machine.id), "Fly Machine sample contains duplicate ids");
+    seen.add(machine.id);
+    if (machine.state === "destroyed") continue;
+
+    requireCondition(isRecord(machine.config), "Machine configuration is missing");
+    requireCondition(
+      machine.state === "started" || machine.state === "stopped",
+      "Fly convergence contains an invalid Machine state"
+    );
+    requireCondition(
+      machineProcessGroup(machine) === expectedProcessGroup,
+      "Fly convergence contains an unexpected Machine process group"
+    );
+    requireCondition(
+      Array.isArray(machine.config.services) && machine.config.services.length > 0,
+      "Fly convergence contains a Machine without the managed service"
+    );
+    candidates.push(machine);
+  }
+  candidates.sort((left, right) => left.id.localeCompare(right.id));
+  requireCondition(
+    candidates.length === 2,
+    "fleet convergence requires exactly two app Machines"
+  );
+  return candidates;
+}
+
+function validateConvergenceSample(machines, desired, image) {
+  const expectedImage = parseImage(image, desired.app);
+  const candidates = collectConvergenceMachines(machines, desired.processGroup);
+  for (const machine of candidates) {
+    assertMachineDefinition(machine, desired, expectedImage);
+    machineServiceHealthPassing(machine, desired);
+  }
+  return candidates;
 }
 
 function normalizeProtocolStatus(value) {
@@ -582,7 +671,7 @@ async function readCandidateWriterProtocolStatus(
 async function readWriterProtocolStatus(flyctl, app, machineId, options = {}) {
   exactString(flyctl, "FLYCTL_BIN");
   requireCondition(/^[a-z0-9-]+$/.test(app), "Fly app is invalid");
-  requireCondition(/^[A-Za-z0-9_-]{1,128}$/.test(machineId), "Fly Machine id is invalid");
+  exactMachineId(machineId);
   const execute = options.execFile || execFileAsync;
   requireCondition(typeof execute === "function", "Fly protocol executor is invalid");
   let result;
@@ -652,6 +741,74 @@ async function attestRepeatedly(options) {
   });
 }
 
+function sameMachineIds(machines, expectedIds) {
+  return JSON.stringify(machines.map((machine) => machine.id)) === JSON.stringify(expectedIds);
+}
+
+function convergenceFleetPassing(machines, desired) {
+  for (const machine of machines) {
+    if (machine.state !== "started") return false;
+    if (!machineServiceHealthPassing(machine, desired)) return false;
+  }
+  return true;
+}
+
+async function convergeFleet(options) {
+  requireCondition(isRecord(options), "Fly convergence options are invalid");
+  const desired = desiredStateForPhase(options.desired, options.phase);
+  const polls = exactInteger(options.polls, "convergence polls", 1, 120);
+  const delayMs = exactInteger(options.delayMs, "convergence delay", 0, 60_000);
+  requireCondition(typeof options.sample === "function", "Machine sampler is required");
+  requireCondition(typeof options.startMachine === "function", "Machine starter is required");
+  requireCondition(typeof options.sleep === "function", "convergence sleep is required");
+
+  let candidates = validateConvergenceSample(
+    await options.sample(),
+    desired,
+    options.image
+  );
+  const stableIds = candidates.map((machine) => machine.id);
+  if (convergenceFleetPassing(candidates, desired)) {
+    return Object.freeze({ machineIds: stableIds, phase: options.phase, startedIds: [] });
+  }
+
+  const startedIds = candidates
+    .filter((machine) => machine.state === "stopped")
+    .map((machine) => machine.id);
+  for (const machineId of startedIds) {
+    await options.startMachine(machineId);
+  }
+
+  const observedStarted = new Set(
+    candidates.filter((machine) => machine.state === "started").map((machine) => machine.id)
+  );
+  for (let index = 0; index < polls; index += 1) {
+    if (index > 0) await options.sleep(delayMs);
+    candidates = validateConvergenceSample(
+      await options.sample(),
+      desired,
+      options.image
+    );
+    requireCondition(
+      sameMachineIds(candidates, stableIds),
+      "Machine identities changed during fleet convergence",
+      "fly_convergence_drift"
+    );
+    for (const machine of candidates) {
+      requireCondition(
+        !(observedStarted.has(machine.id) && machine.state !== "started"),
+        "Machine state regressed during fleet convergence",
+        "fly_convergence_drift"
+      );
+      if (machine.state === "started") observedStarted.add(machine.id);
+    }
+    if (convergenceFleetPassing(candidates, desired)) {
+      return Object.freeze({ machineIds: stableIds, phase: options.phase, startedIds });
+    }
+  }
+  throw rolloutError("fly_convergence_timeout", "Fly fleet convergence timed out");
+}
+
 function readArgument(args, name, options = {}) {
   const prefix = "--" + name + "=";
   const values = args.filter((value) => value.startsWith(prefix));
@@ -662,12 +819,27 @@ function readArgument(args, name, options = {}) {
   return value;
 }
 
-async function listMachines(flyctl, app) {
-  const result = await execFileAsync(
-    flyctl,
-    ["machine", "list", "--app", app, "--json"],
-    { encoding: "utf8", maxBuffer: MAX_MACHINE_LIST_BYTES, windowsHide: true }
-  );
+async function listMachines(flyctl, app, options = {}) {
+  exactString(flyctl, "FLYCTL_BIN");
+  requireCondition(/^[a-z0-9-]+$/.test(app), "Fly app is invalid");
+  const execute = options.execFile || execFileAsync;
+  requireCondition(typeof execute === "function", "Fly Machine list executor is invalid");
+  let result;
+  try {
+    result = await execute(
+      flyctl,
+      ["machine", "list", "--app", app, "--json"],
+      {
+        encoding: "utf8",
+        maxBuffer: MAX_MACHINE_LIST_BYTES,
+        timeout: MACHINE_LIST_TIMEOUT_MS,
+        windowsHide: true,
+      }
+    );
+  } catch (_error) {
+    throw rolloutError("fly_machine_list_failed", "Fly Machine list failed");
+  }
+  requireCondition(isRecord(result) && typeof result.stdout === "string", "Fly Machine reply is invalid");
   requireCondition(
     Buffer.byteLength(result.stdout, "utf8") <= MAX_MACHINE_LIST_BYTES,
     "Fly Machine response is oversized"
@@ -676,6 +848,28 @@ async function listMachines(flyctl, app) {
     return JSON.parse(result.stdout);
   } catch (_error) {
     throw rolloutError("fly_attestation_invalid", "Fly Machine response is invalid JSON");
+  }
+}
+
+async function startMachine(flyctl, app, machineId, options = {}) {
+  exactString(flyctl, "FLYCTL_BIN");
+  requireCondition(/^[a-z0-9-]+$/.test(app), "Fly app is invalid");
+  exactMachineId(machineId);
+  const execute = options.execFile || execFileAsync;
+  requireCondition(typeof execute === "function", "Fly Machine start executor is invalid");
+  try {
+    await execute(
+      flyctl,
+      ["machine", "start", machineId, "--app", app],
+      {
+        encoding: "utf8",
+        maxBuffer: MAX_MACHINE_COMMAND_BYTES,
+        timeout: MACHINE_START_TIMEOUT_MS,
+        windowsHide: true,
+      }
+    );
+  } catch (_error) {
+    throw rolloutError("fly_convergence_start_failed", "Fly Machine start failed");
   }
 }
 
@@ -706,7 +900,7 @@ async function externalReadiness(baseUrl) {
 async function main(args = process.argv.slice(2)) {
   const command = args[0];
   requireCondition(
-    command === "validate" || command === "plan" || command === "attest",
+    command === "validate" || command === "plan" || command === "converge" || command === "attest",
     "managed rollout command is invalid"
   );
   const app = readArgument(args, "app");
@@ -736,8 +930,25 @@ async function main(args = process.argv.slice(2)) {
     return;
   }
   const image = readArgument(args, "image");
-  const baseUrl = readArgument(args, "base-url");
   const phase = readArgument(args, "phase");
+  if (command === "converge") {
+    const result = await convergeFleet({
+      desired,
+      phase,
+      image,
+      polls: DEFAULT_CONVERGENCE_POLLS,
+      delayMs: DEFAULT_CONVERGENCE_DELAY_MS,
+      sample: () => listMachines(flyctl, app),
+      startMachine: (machineId) => startMachine(flyctl, app, machineId),
+      sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+    });
+    process.stdout.write(
+      "Managed Fly " + result.phase + " fleet converged with " +
+        result.machineIds.length + " started Machines.\n"
+    );
+    return;
+  }
+  const baseUrl = readArgument(args, "base-url");
   const result = await attestRepeatedly({
     desired,
     phase,
@@ -768,6 +979,7 @@ module.exports = {
   attestRepeatedly,
   CANDIDATE_PROTOCOL_STATUS_COMMAND,
   collectServingMachines,
+  convergeFleet,
   desiredStateForPhase,
   environmentWithoutRedisUrl,
   loadDesiredState,
@@ -778,5 +990,7 @@ module.exports = {
   PROTOCOL_STATUS_MARKER,
   readCandidateWriterProtocolStatus,
   readWriterProtocolStatus,
+  startMachine,
+  validateConvergenceSample,
   validateFleetSample,
 };

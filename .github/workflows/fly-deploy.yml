@@ -480,6 +480,16 @@ jobs:
             --strategy rolling \
             --wait-timeout 10m \
             --yes
+      - name: Converge the exact transition fleet before attestation
+        if: steps.writer-protocol.outputs.transition_required == 'true'
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: >-
+          node scripts/ci/fly-managed-rollout.js converge
+          --app=jumpgate-bridge
+          --config=fly.toml
+          --image="$IMMUTABLE_IMAGE_REF"
+          --phase=transition
       - name: Attest the exact transition fleet across repeated intervals
         if: steps.writer-protocol.outputs.transition_required == 'true'
         env:
@@ -503,6 +513,15 @@ jobs:
             --strategy rolling \
             --wait-timeout 10m \
             --yes
+      - name: Converge the exact final v6 fleet before attestation
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: >-
+          node scripts/ci/fly-managed-rollout.js converge
+          --app=jumpgate-bridge
+          --config=fly.toml
+          --image="$IMMUTABLE_IMAGE_REF"
+          --phase=v6
       - name: Attest the exact final v6 fleet across repeated intervals
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
