@@ -141,6 +141,7 @@ class FakeElement {
 function createConfigureDocument(bootstrap) {
   const html = fs.readFileSync(publicPath("configure.html"), "utf8");
   const elements = new Map();
+  const submittedForms = [];
   for (const match of html.matchAll(/<[^>]+\bid="([^"]+)"[^>]*>/g)) {
     const markup = match[0];
     const classes = /\bclass="([^"]*)"/.exec(markup);
@@ -159,12 +160,19 @@ function createConfigureDocument(bootstrap) {
   }
   elements.get("jumpgate-bootstrap").textContent = JSON.stringify(bootstrap);
 
+  const body = new FakeElement("document-body");
   const document = {
+    body,
     getElementById(id) {
       return elements.get(id) || null;
     },
-    createElement() {
-      return new FakeElement();
+    createElement(tagName) {
+      const element = new FakeElement();
+      element.tagName = String(tagName || "").toUpperCase();
+      if (element.tagName === "FORM") {
+        element.submit = () => submittedForms.push(element);
+      }
+      return element;
     },
     querySelectorAll(selector) {
       if (selector === "[data-copy]") {
@@ -181,7 +189,7 @@ function createConfigureDocument(bootstrap) {
       return true;
     },
   };
-  return { document, elements };
+  return { document, elements, submittedForms };
 }
 
 function jsonResponse(status, body) {
@@ -245,14 +253,18 @@ function elementText(element) {
   return [element.textContent, ...(element.children || []).map(elementText)].join(" ").trim();
 }
 
-function createRaceHarness(route, stremioAccountClient) {
-  const { document, elements } = createConfigureDocument({
+function createRaceHarness(route, stremioAccountClient, managementTraktConnect = "form-v2") {
+  const { document, elements, submittedForms } = createConfigureDocument({
     initial: { config: "config-safe", name: "Race profile" },
+    ...(managementTraktConnect === null ? {} : { managementTraktConnect }),
   });
   let storedPairing = null;
   let pairingCount = 0;
   let deviceCallCount = 0;
   const providerCalls = [];
+  const fetchCalls = [];
+  const alerts = [];
+  const redirects = [];
   const browser = {
     document,
     location: {
@@ -260,7 +272,9 @@ function createRaceHarness(route, stremioAccountClient) {
       pathname: "/configure",
       search: "",
       hash: "",
-      assign() {},
+      assign(target) {
+        redirects.push(target);
+      },
     },
     history: { replaceState() {} },
     navigator: {},
@@ -284,7 +298,9 @@ function createRaceHarness(route, stremioAccountClient) {
         storedPairing = null;
       },
     },
-    alert() {},
+    alert(message) {
+      alerts.push(message);
+    },
     confirm() {
       return true;
     },
@@ -294,6 +310,7 @@ function createRaceHarness(route, stremioAccountClient) {
     async fetch(url, options) {
       const request = options || {};
       const method = request.method || "GET";
+      fetchCalls.push(`${method} ${url}`);
       if (url === "/pair/activate") {
         pairingCount += 1;
         return jsonResponse(200, {
@@ -338,8 +355,12 @@ function createRaceHarness(route, stremioAccountClient) {
 
   client.mount(browser);
   return {
+    alerts,
     elements,
+    fetchCalls,
     providerCalls,
+    redirects,
+    submittedForms,
     get deviceCallCount() {
       return deviceCallCount;
     },
@@ -695,6 +716,231 @@ test("a stale 401 after re-pair cannot clear the newer authority or UI", async (
   );
 });
 
+const managementRaceActions = [
+  {
+    name: "managed Trakt disconnect",
+    method: "DELETE",
+    url: "/api/profile/trakt",
+    successStatus: 200,
+    successBody: { ok: true },
+    start(harness) {
+      harness.elements.get("disconnectTraktBtn").dispatch("click");
+    },
+  },
+  {
+    name: "device revocation",
+    method: "DELETE",
+    url: "/api/profile/devices/device_race",
+    successStatus: 200,
+    successBody: { ok: true },
+    start(harness) {
+      const row = harness.elements.get("deviceList").children[0];
+      assert.ok(row, "paired device row was not rendered");
+      row.children[1].dispatch("click");
+    },
+  },
+  {
+    name: "history clearing",
+    method: "DELETE",
+    url: "/api/profile/history",
+    successStatus: 200,
+    successBody: { ok: true },
+    start(harness) {
+      harness.elements.get("clearHistoryBtn").dispatch("click");
+    },
+  },
+  {
+    name: "profile deletion",
+    method: "DELETE",
+    url: "/api/profile",
+    successStatus: 202,
+    successBody: { ok: true, status: "pending" },
+    start(harness) {
+      harness.elements.get("openDeleteProfileBtn").dispatch("click");
+      const confirmation = harness.elements.get("deleteProfileConfirmation");
+      confirmation.value = "DELETE PROFILE";
+      confirmation.dispatch("input");
+      harness.elements.get("deleteProfileForm").dispatch("submit");
+    },
+  },
+];
+
+for (const completion of [
+  {
+    name: "late success",
+    response(action) {
+      return [action.successStatus, action.successBody];
+    },
+  },
+  {
+    name: "stale 403 profile-unavailable error",
+    response() {
+      return [403, { ok: false, error: "profile_unavailable" }];
+    },
+  },
+]) {
+  for (const action of managementRaceActions) {
+    test(`${completion.name} from old ${action.name} cannot affect a re-paired authority`, async () => {
+      const pending = deferredResponse();
+      let actionStarted = false;
+      const harness = createRaceHarness(({ url, method, request, pairingCount }) => {
+        if (url === "/api/profile/devices" && method === "GET") {
+          return jsonResponse(200, {
+            ok: true,
+            devices: [
+              {
+                deviceId: "device_race",
+                displayName: `Session ${pairingCount} device`,
+                current: true,
+              },
+            ],
+            traktLinked: true,
+          });
+        }
+        if (url === action.url && method === action.method) {
+          actionStarted = true;
+          return pending.wait(request.signal);
+        }
+        return undefined;
+      });
+
+      await harness.pair();
+      await waitFor(
+        () =>
+          harness.elements.get("refreshDevicesBtn").disabled === false &&
+          /Session 1 device/.test(elementText(harness.elements.get("deviceList"))),
+        "first authority management state did not settle"
+      );
+      action.start(harness);
+      await waitFor(() => actionStarted, `${action.name} did not start`);
+
+      await harness.pair();
+      await waitFor(
+        () =>
+          harness.elements.get("managementStatus").textContent ===
+            "Paired-profile state refreshed." &&
+          /Session 2 device/.test(elementText(harness.elements.get("deviceList"))),
+        "re-paired authority management state did not settle"
+      );
+
+      const [status, body] = completion.response(action);
+      pending.respond(status, body);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      assert.deepEqual(harness.redirects, []);
+      assert.deepEqual(harness.alerts, []);
+      assert.equal(harness.deviceCallCount, 2);
+      assert.match(harness.elements.get("pairStatus").textContent, /Paired with Session 2/);
+      assert.equal(
+        harness.elements.get("managementStatus").textContent,
+        "Paired-profile state refreshed."
+      );
+      assert.match(elementText(harness.elements.get("deviceList")), /Session 2 device/);
+      assert.equal(harness.elements.get("profileManagement").classList.contains("hidden"), false);
+      assert.equal(harness.elements.get("deleteProfileDialog").open, false);
+      assert.equal(harness.elements.get("deleteProfileConfirmation").value, "");
+      assert.equal(harness.elements.get("deleteProfileConfirmation").disabled, false);
+      assert.equal(harness.elements.get("confirmDeleteProfileBtn").disabled, true);
+    });
+  }
+}
+
+for (const action of managementRaceActions) {
+  test(`expiry while old ${action.name} is pending suppresses its late success`, async () => {
+    const pending = deferredResponse();
+    let actionStarted = false;
+    const harness = createRaceHarness(({ url, method, request }) => {
+      if (url === "/api/profile/devices" && method === "GET") {
+        return jsonResponse(200, {
+          ok: true,
+          devices: [
+            { deviceId: "device_race", displayName: "Expiring device", current: true },
+          ],
+          traktLinked: true,
+        });
+      }
+      if (url === "/api/profile/providers/preview" && method === "POST") {
+        return jsonResponse(401, { ok: false, error: "management_auth_required" });
+      }
+      if (url === action.url && method === action.method) {
+        actionStarted = true;
+        return pending.wait(request.signal);
+      }
+      return undefined;
+    });
+
+    await harness.pair();
+    await waitFor(
+      () => harness.elements.get("refreshDevicesBtn").disabled === false,
+      "profile management did not become available"
+    );
+    action.start(harness);
+    await waitFor(() => actionStarted, `${action.name} did not start`);
+    harness.startManualImport();
+    await waitFor(
+      () => /Management authorization expired/.test(harness.elements.get("pairStatus").textContent),
+      "concurrent expiry did not invalidate management authority"
+    );
+
+    pending.respond(action.successStatus, action.successBody);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.deepEqual(harness.redirects, []);
+    assert.deepEqual(harness.alerts, []);
+    assert.equal(harness.elements.get("profileManagement").classList.contains("hidden"), true);
+    assert.equal(harness.elements.get("deleteProfileDialog").open, false);
+    assert.equal(harness.elements.get("deleteProfileConfirmation").value, "");
+    assert.equal(harness.elements.get("deleteProfileConfirmation").disabled, false);
+    assert.equal(harness.elements.get("confirmDeleteProfileBtn").disabled, true);
+    assert.match(harness.elements.get("managementStatus").textContent, /authorization expired/i);
+    assert.doesNotMatch(elementText(harness.elements.get("deviceList")), /Expiring device/);
+  });
+}
+
+test("current profile_unavailable invalidation closes and resets a pending delete dialog", async () => {
+  const pendingDelete = deferredResponse();
+  let deleteStarted = false;
+  const harness = createRaceHarness(({ url, method, request }) => {
+    if (url === "/api/profile" && method === "DELETE") {
+      deleteStarted = true;
+      return pendingDelete.wait(request.signal);
+    }
+    return undefined;
+  });
+
+  await harness.pair();
+  await waitFor(
+    () => harness.elements.get("openDeleteProfileBtn").disabled === false,
+    "profile management did not become available"
+  );
+  harness.elements.get("openDeleteProfileBtn").dispatch("click");
+  const confirmation = harness.elements.get("deleteProfileConfirmation");
+  confirmation.value = "DELETE PROFILE";
+  confirmation.dispatch("input");
+  harness.elements.get("deleteProfileForm").dispatch("submit");
+  await waitFor(() => deleteStarted, "profile deletion did not start");
+  assert.equal(harness.elements.get("deleteProfileDialog").open, true);
+  assert.equal(confirmation.disabled, true);
+  assert.equal(harness.elements.get("confirmDeleteProfileBtn").textContent, "Deletion requested...");
+
+  pendingDelete.respond(403, { ok: false, error: "profile_unavailable" });
+  await waitFor(
+    () => /Management authorization expired/.test(harness.elements.get("pairStatus").textContent),
+    "profile_unavailable did not invalidate management authority"
+  );
+
+  assert.equal(harness.elements.get("deleteProfileDialog").open, false);
+  assert.equal(confirmation.value, "");
+  assert.equal(confirmation.disabled, false);
+  assert.equal(harness.elements.get("confirmDeleteProfileBtn").disabled, true);
+  assert.equal(
+    harness.elements.get("confirmDeleteProfileBtn").textContent,
+    "Delete profile permanently"
+  );
+  assert.equal(harness.elements.get("deleteDialogStatus").textContent, "");
+  assert.equal(harness.elements.get("profileManagement").classList.contains("hidden"), true);
+});
+
 test("a delayed automatic device refresh cannot repopulate state after auth expiry", async () => {
   const oldDevices = deferredResponse();
   const harness = createRaceHarness(({ url, method, request, deviceCallCount }) => {
@@ -954,6 +1200,105 @@ test("non-management provider errors preserve active management authority", asyn
   );
   assert.equal(authRequiredCalls, 0);
 });
+
+test("provider requester treats only current exact 403 profile_unavailable as terminal", async () => {
+  let authRequiredCalls = 0;
+  const authority = managementAuthorityOptions("csrf-live");
+  const request = client.createManagementProfileRequester({
+    getAuthority: authority.getAuthority,
+    isAuthorityCurrent: authority.isAuthorityCurrent,
+    onAuthRequired() {
+      authRequiredCalls += 1;
+    },
+    async fetch() {
+      return jsonResponse(403, { ok: false, error: "profile_unavailable" });
+    },
+  });
+
+  await assert.rejects(
+    () => request("/api/profile/providers", { method: "GET" }),
+    (error) => error.code === "management_auth_required" && error.status === 403
+  );
+  assert.equal(authRequiredCalls, 1);
+});
+
+test("provider requester suppresses stale exact 403 profile_unavailable invalidation", async () => {
+  const authority = Object.freeze({ epoch: 1, csrf: "csrf-old" });
+  let current = true;
+  let authRequiredCalls = 0;
+  const request = client.createManagementProfileRequester({
+    getAuthority: () => authority,
+    isAuthorityCurrent: (candidate) => current && candidate === authority,
+    onAuthRequired() {
+      authRequiredCalls += 1;
+    },
+    async fetch() {
+      current = false;
+      return jsonResponse(403, { ok: false, error: "profile_unavailable" });
+    },
+  });
+
+  await assert.rejects(
+    () => request("/api/profile/providers", { method: "GET" }),
+    (error) => error.code === "stale_management_authority"
+  );
+  assert.equal(authRequiredCalls, 0);
+});
+
+for (const body of [
+  { ok: false, error: "management_auth_required" },
+  { ok: false, error: "unexpected_body" },
+  {},
+]) {
+  test(`provider requester treats every 401 as terminal (${body.error || "no error"})`, async () => {
+    let authRequiredCalls = 0;
+    const authority = managementAuthorityOptions("csrf-live");
+    const request = client.createManagementProfileRequester({
+      getAuthority: authority.getAuthority,
+      isAuthorityCurrent: authority.isAuthorityCurrent,
+      onAuthRequired() {
+        authRequiredCalls += 1;
+      },
+      async fetch() {
+        return jsonResponse(401, body);
+      },
+    });
+
+    await assert.rejects(
+      () => request("/api/profile/providers", { method: "GET" }),
+      (error) => error.code === "management_auth_required" && error.status === 401
+    );
+    assert.equal(authRequiredCalls, 1);
+  });
+}
+
+for (const [status, body] of [
+  [404, { ok: false, error: "profile_unavailable" }],
+  [500, { ok: false, error: "profile_unavailable" }],
+  [403, { ok: false, error: "management_auth_required" }],
+  [403, { ok: false, error: "profile_unavailable_changed" }],
+]) {
+  test(`provider requester keeps ${status}/${body.error} nonterminal`, async () => {
+    let authRequiredCalls = 0;
+    const authority = managementAuthorityOptions("csrf-live");
+    const request = client.createManagementProfileRequester({
+      getAuthority: authority.getAuthority,
+      isAuthorityCurrent: authority.isAuthorityCurrent,
+      onAuthRequired() {
+        authRequiredCalls += 1;
+      },
+      async fetch() {
+        return jsonResponse(status, body);
+      },
+    });
+
+    await assert.rejects(
+      () => request("/api/profile/providers", { method: "GET" }),
+      (error) => error.code === body.error && error.status === status
+    );
+    assert.equal(authRequiredCalls, 0);
+  });
+}
 
 test("chunked previews preserve order and cap the default selection", async () => {
   const descriptors = Array.from({ length: 130 }, (_, index) => descriptor(`provider-${index}`, ["stream"]));
@@ -1243,7 +1588,10 @@ test("paired-profile lifecycle client uses fixed methods, CSRF, and same-origin 
     ["DELETE /api/profile/devices/device_safe_1", { status: 200, body: { ok: true } }],
     ["DELETE /api/profile/history", { status: 200, body: { ok: true } }],
     ["DELETE /api/profile/trakt", { status: 200, body: { ok: true } }],
-    ["POST /api/profile/trakt/connect", { status: 200, body: { ok: true, url: "/api/profile/trakt/connect/continue" } }],
+    [
+      "POST /api/profile/trakt/connect",
+      { status: 200, body: { ok: true, url: "/api/profile/trakt/connect/continue" } },
+    ],
     ["DELETE /api/profile", { status: 202, body: { ok: true, status: "pending" } }],
   ]);
   const authority = managementAuthorityOptions("csrf_private_value");
@@ -1367,7 +1715,7 @@ test("paired-device parsing exposes display metadata only and trusts only explic
   );
 });
 
-test("management errors are sanitized and Trakt redirects fail closed across origins", async () => {
+test("management errors are sanitized", async () => {
   assert.equal(
     client.safeSameOriginRedirect("/continue", "https://bridge.example"),
     "https://bridge.example/continue"
@@ -1376,7 +1724,6 @@ test("management errors are sanitized and Trakt redirects fail closed across ori
     () => client.safeSameOriginRedirect("https://attacker.example/steal", "https://bridge.example"),
     /unsafe Trakt connection route/
   );
-
   const authority = managementAuthorityOptions("csrf_value");
   const api = client.createProfileManagementApi({
     authority: authority.authority,
@@ -1447,6 +1794,124 @@ test("profile management UI requires confirmations, disables pending actions, an
   assert.match(configureSource, /setHidden\(byId\("result"\), true\)/);
   assert.match(configureSource, /refreshSteps\(\);[\s\S]*?byId\("name"\)\.focus\(\)/);
   assert.doesNotMatch(configureSource, /console\s*\./);
+});
+
+for (const buttonId of ["connectTraktBtn", "reconnectTraktBtn"]) {
+  test(`${buttonId} synchronously submits one fixed Trakt POST with the current CSRF`, async () => {
+    const harness = createRaceHarness();
+    await harness.pair();
+    await harness.pair();
+    await waitFor(
+      () => harness.elements.get("refreshDevicesBtn").disabled === false,
+      "profile management did not become available"
+    );
+    const fetchCount = harness.fetchCalls.length;
+
+    harness.elements.get(buttonId).dispatch("click");
+
+    assert.equal(harness.submittedForms.length, 1);
+    const form = harness.submittedForms[0];
+    assert.equal(form.attributes.get("method"), "post");
+    assert.equal(form.attributes.get("action"), "/api/profile/trakt/connect");
+    assert.equal(form.attributes.get("enctype"), "application/x-www-form-urlencoded");
+    assert.equal(form.children.length, 1);
+    assert.equal(form.children[0].attributes.get("type"), "hidden");
+    assert.equal(form.children[0].attributes.get("name"), "csrf");
+    assert.equal(form.children[0].value, "csrf-2");
+    assert.equal(harness.fetchCalls.length, fetchCount);
+    assert.deepEqual(harness.redirects, []);
+
+    harness.elements.get(buttonId).dispatch("click");
+    harness.elements.get(buttonId === "connectTraktBtn" ? "reconnectTraktBtn" : "connectTraktBtn")
+      .dispatch("click");
+    assert.equal(harness.submittedForms.length, 1);
+    assert.equal(harness.fetchCalls.length, fetchCount);
+    assert.deepEqual(harness.redirects, []);
+  });
+}
+
+for (const [name, protocol] of [
+  ["advertised ajax-v1", "ajax-v1"],
+  ["an old page without a protocol marker", null],
+]) {
+  test(`${name} uses one authority-fenced cached-client Trakt request`, async () => {
+    const pending = deferredResponse();
+    let connectRequest = null;
+    const harness = createRaceHarness(
+      ({ url, method, request }) => {
+        if (url !== "/api/profile/trakt/connect" || method !== "POST") return undefined;
+        connectRequest = request;
+        return pending.wait(request.signal);
+      },
+      undefined,
+      protocol
+    );
+    await harness.pair();
+    await harness.pair();
+    await waitFor(
+      () => harness.elements.get("refreshDevicesBtn").disabled === false,
+      "profile management did not become available"
+    );
+
+    harness.elements.get("connectTraktBtn").dispatch("click");
+    harness.elements.get("reconnectTraktBtn").dispatch("click");
+    await waitFor(() => Boolean(connectRequest), "cached-client Trakt request did not start");
+    assert.equal(
+      harness.fetchCalls.filter((value) => value === "POST /api/profile/trakt/connect").length,
+      1
+    );
+    assert.equal(connectRequest.headers.get("X-Jumpgate-CSRF"), "csrf-2");
+    assert.equal(connectRequest.headers.has("Content-Type"), false);
+    assert.equal(connectRequest.body, undefined);
+    assert.equal(connectRequest.credentials, "same-origin");
+    assert.equal(connectRequest.cache, "no-store");
+    assert.equal(harness.submittedForms.length, 0);
+
+    pending.respond(200, {
+      ok: true,
+      url: "/api/profile/trakt/connect/continue",
+    });
+    await waitFor(() => harness.redirects.length === 1, "cached-client redirect did not start");
+    assert.deepEqual(harness.redirects, [
+      "https://bridge.example/api/profile/trakt/connect/continue",
+    ]);
+  });
+}
+
+test("an unknown advertised Trakt protocol fails closed without a request or form", async () => {
+  const harness = createRaceHarness(undefined, undefined, "future-v9");
+  await harness.pair();
+  await waitFor(
+    () => harness.elements.get("refreshDevicesBtn").disabled === false,
+    "profile management did not become available"
+  );
+  const fetchCount = harness.fetchCalls.length;
+  harness.elements.get("connectTraktBtn").dispatch("click");
+  await waitFor(() => harness.alerts.length === 1, "protocol mismatch was not shown");
+  assert.match(harness.alerts[0], /disagree on the Trakt connection protocol/i);
+  assert.equal(harness.fetchCalls.length, fetchCount);
+  assert.equal(harness.submittedForms.length, 0);
+  assert.deepEqual(harness.redirects, []);
+});
+
+test("a stale management authority cannot submit a Trakt form", () => {
+  const { document, submittedForms } = createConfigureDocument({});
+  const authority = Object.freeze({ epoch: 1, csrf: "csrf-stale" });
+  let current = true;
+  const createElement = document.createElement.bind(document);
+  document.createElement = (tagName) => {
+    const element = createElement(tagName);
+    if (String(tagName).toLowerCase() === "input") current = false;
+    return element;
+  };
+  const submitter = client.createManagementTraktSubmitter({
+    document,
+    isAuthorityCurrent: (candidate) => current && candidate === authority,
+  });
+
+  assert.equal(submitter.submit(authority), false);
+  assert.equal(submittedForms.length, 0);
+  assert.equal(document.body.children.length, 0);
 });
 
 test("owned production sources contain no Stremio mutation or rollback path", () => {
@@ -1544,8 +2009,15 @@ test("safe-flow UI is pair-gated, accessible, read-only, and profile-specific", 
     /previewManualBtn"\)\.disabled = providerBusy \|\| !\(hasConfig && pairedForConfig && managementCsrf\)/
   );
   assert.match(configureSource, /if \(!profileManagementApi \|\| !managementCsrf\)/);
-  assert.match(configureSource, /await profileManagementApi\.connectTrakt\(\)/);
+  assert.match(configureSource, /setAttribute\("action", "\/api\/profile\/trakt\/connect"\)/);
+  assert.match(configureSource, /setAttribute\("name", "csrf"\)/);
+  assert.match(configureSource, /csrf\.value = authority\.csrf/);
+  assert.match(configureSource, /form\.submit\(\)/);
+  assert.match(configureSource, /managementTraktConnectProtocol === "form-v2"/);
+  assert.match(configureSource, /await api\.connectTrakt\(\)/);
+  assert.match(configureSource, /browser\.location\.assign\(target\)/);
   assert.doesNotMatch(configureSource, /fetch\("\/auth\/trakt\/start"/);
+  assert.match(indexSource, /app\.get\("\/api\/profile\/trakt\/connect\/continue"/);
   assert.doesNotMatch(indexSource, /app\.(?:get|post)\("\/auth\/trakt(?:\/start)?"/);
   assert.doesNotMatch(indexSource, /\/v1\/trakt\/token|\/auth\/token/);
 });

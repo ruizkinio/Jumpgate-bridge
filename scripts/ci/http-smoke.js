@@ -199,6 +199,10 @@ async function runSemanticContract() {
     "version/parts"
   );
   requireContract(version.buildSha === expectedBuildSha, "version/build");
+  requireContract(
+    version.capabilities && version.capabilities.managementTraktOAuth === "m1-m2-v1",
+    "version/management-trakt-oauth-capability"
+  );
 
   const manifest = await readJson("/manifest.json", "manifest");
   requireContract(manifest && manifest.id === "com.jumpgate.bridge", "manifest/id");

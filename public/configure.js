@@ -280,10 +280,60 @@
   }
 
   function isManagementAuthRequiredResponse(response, body) {
+    return Boolean(response && response.status === 401);
+  }
+
+  function isManagementAuthorityTerminalResponse(response, body) {
     return Boolean(
-      response &&
-        (response.status === 401 || (isRecord(body) && body.error === "management_auth_required"))
+      isManagementAuthRequiredResponse(response, body) ||
+        (response &&
+          response.status === 403 &&
+          isRecord(body) &&
+          body.error === "profile_unavailable")
     );
+  }
+
+  function createManagementTraktSubmitter(options) {
+    const input = options || {};
+    if (!input.document || typeof input.document.createElement !== "function") {
+      throw new TypeError("document is required");
+    }
+    if (typeof input.isAuthorityCurrent !== "function") {
+      throw new TypeError("management authority validator is required");
+    }
+    let submitted = false;
+
+    return Object.freeze({
+      reset() {
+        submitted = false;
+      },
+      submit(authority) {
+        if (submitted || !validManagementAuthority(authority)) return false;
+        if (!input.isAuthorityCurrent(authority)) return false;
+        submitted = true;
+        try {
+          const form = input.document.createElement("form");
+          const csrf = input.document.createElement("input");
+          form.setAttribute("method", "post");
+          form.setAttribute("action", "/api/profile/trakt/connect");
+          form.setAttribute("enctype", "application/x-www-form-urlencoded");
+          csrf.setAttribute("type", "hidden");
+          csrf.setAttribute("name", "csrf");
+          csrf.value = authority.csrf;
+          form.appendChild(csrf);
+          if (!input.isAuthorityCurrent(authority)) {
+            submitted = false;
+            return false;
+          }
+          input.document.body.appendChild(form);
+          form.submit();
+          return true;
+        } catch (error) {
+          submitted = false;
+          throw error;
+        }
+      },
+    });
   }
 
   function managementAuthRequiredError(status) {
@@ -334,7 +384,7 @@
       });
       const body = await response.json().catch(() => ({}));
       const authorityIsCurrent = input.isAuthorityCurrent(authority);
-      if (isManagementAuthRequiredResponse(response, body)) {
+      if (isManagementAuthorityTerminalResponse(response, body)) {
         if (!authorityIsCurrent) throw staleManagementAuthorityError();
         const error = managementAuthRequiredError(response.status);
         if (typeof input.onAuthRequired === "function") input.onAuthRequired(error, authority);
@@ -361,8 +411,6 @@
     if (typeof input.isAuthorityCurrent !== "function") {
       throw new TypeError("management authority validator is required");
     }
-    const origin = new URL(input.origin).origin;
-
     async function request(path, requestOptions, expectedStatus) {
       const request = requestOptions || {};
       const headers = new Headers(request.headers || {});
@@ -384,7 +432,7 @@
       let body = null;
       if (response.status !== 204) body = await response.json().catch(() => null);
       const authorityIsCurrent = input.isAuthorityCurrent(input.authority);
-      if (isManagementAuthRequiredResponse(response, body)) {
+      if (isManagementAuthorityTerminalResponse(response, body)) {
         if (!authorityIsCurrent) throw staleManagementAuthorityError();
         const error = managementAuthRequiredError(response.status);
         if (typeof input.onAuthRequired === "function") {
@@ -423,7 +471,7 @@
       },
       async connectTrakt() {
         const body = await request("/api/profile/trakt/connect", { method: "POST" });
-        return safeSameOriginRedirect(body.url, origin);
+        return safeSameOriginRedirect(body.url, input.origin);
       },
       deleteProfile() {
         return request("/api/profile", { method: "DELETE" }, 202);
@@ -700,6 +748,13 @@
     let bootstrap = bootstrapElement ? JSON.parse(bootstrapElement.textContent || "{}") : {};
     let initial = bootstrap.initial || null;
     let pairPrefill = bootstrap.pairPrefill || null;
+    const managementTraktConnectProtocol =
+      bootstrap.managementTraktConnect === undefined ||
+      bootstrap.managementTraktConnect === "ajax-v1"
+        ? "ajax-v1"
+        : bootstrap.managementTraktConnect === "form-v2"
+        ? "form-v2"
+        : null;
 
     let pairedForConfig = false;
     let providersReady = false;
@@ -738,9 +793,16 @@
       );
     }
 
+    const managementTraktSubmitter = createManagementTraktSubmitter({
+      document,
+      isAuthorityCurrent: isManagementAuthorityCurrent,
+    });
+
     function advanceManagementAuthority() {
       managementAuthorityEpoch += 1;
+      managementTraktSubmitter.reset();
       clearProviderAuthorityUi(activeProviderOperation);
+      dismissDeleteProfileDialog();
       setStatus("", false);
     }
 
@@ -977,27 +1039,6 @@
       if (completed) {
         profileTraktLinked = false;
         renderTraktManagementState();
-      }
-    }
-
-    async function connectManagedTrakt() {
-      if (!profileManagementApi || profileManagementBusy) return;
-      const api = profileManagementApi;
-      const authority = captureManagementAuthority();
-      if (!isManagementAuthorityCurrent(authority)) return;
-      setManagementPending(true, authority);
-      setManagementStatus("Preparing the same-origin Trakt connection route...", false);
-      try {
-        const target = await api.connectTrakt();
-        if (!isManagementAuthorityCurrent(authority)) return;
-        setManagementStatus("Opening the Trakt connection flow...", false);
-        browser.location.assign(target);
-      } catch (error) {
-        if (isManagementAuthorityCurrent(authority) && !isCancellationError(error)) {
-          setManagementStatus(error.message || "Jumpgate could not start the Trakt connection.", true);
-        }
-      } finally {
-        setManagementPending(false, authority);
       }
     }
 
@@ -1411,6 +1452,12 @@
       setDeleteDialogStatus("", false);
     }
 
+    function dismissDeleteProfileDialog() {
+      const dialog = byId("deleteProfileDialog");
+      if (dialog.open) dialog.close();
+      resetDeleteProfileDialog();
+    }
+
     function openDeleteProfileDialog() {
       if (!profileManagementApi || profileManagementBusy) return;
       const dialog = byId("deleteProfileDialog");
@@ -1420,9 +1467,7 @@
     }
 
     function closeDeleteProfileDialog() {
-      const dialog = byId("deleteProfileDialog");
-      if (dialog.open) dialog.close();
-      resetDeleteProfileDialog();
+      dismissDeleteProfileDialog();
       if (!byId("openDeleteProfileBtn").disabled) byId("openDeleteProfileBtn").focus();
     }
 
@@ -1669,11 +1714,39 @@
         browser.alert("Pair Jumpgate before connecting Trakt.");
         return;
       }
+      if (profileManagementBusy) return;
+      const authority = captureManagementAuthority();
+      if (!isManagementAuthorityCurrent(authority)) return;
+      const api = profileManagementApi;
+      let navigationStarted = false;
+      setManagementPending(true, authority);
       try {
-        const target = await profileManagementApi.connectTrakt();
+        if (!managementTraktConnectProtocol) {
+          throw new Error(
+            "This page and Bridge disagree on the Trakt connection protocol. Reload and try again."
+          );
+        }
+        if (managementTraktConnectProtocol === "form-v2") {
+          navigationStarted = managementTraktSubmitter.submit(authority);
+          if (navigationStarted) {
+            setManagementStatus("Opening the Trakt connection flow...", false);
+          }
+          return;
+        }
+        const target = await api.connectTrakt();
+        if (!isManagementAuthorityCurrent(authority)) return;
+        navigationStarted = true;
+        setManagementStatus("Opening the Trakt connection flow...", false);
         browser.location.assign(target);
       } catch (error) {
-        browser.alert(error.message || "Unable to start Trakt OAuth");
+        if (isManagementAuthorityCurrent(authority) && !isCancellationError(error)) {
+          if (managementTraktConnectProtocol === "form-v2") {
+            managementTraktSubmitter.reset();
+          }
+          browser.alert(error.message || "Unable to start Trakt OAuth");
+        }
+      } finally {
+        if (!navigationStarted) setManagementPending(false, authority);
       }
     }
 
@@ -2022,7 +2095,7 @@
     byId("installConfiguredBtn").addEventListener("click", installConfigured);
     byId("refreshDevicesBtn").addEventListener("click", () => void refreshProfileManagement());
     byId("clearHistoryBtn").addEventListener("click", () => void clearBridgeHistory());
-    byId("reconnectTraktBtn").addEventListener("click", () => void connectManagedTrakt());
+    byId("reconnectTraktBtn").addEventListener("click", () => void connectTrakt());
     byId("disconnectTraktBtn").addEventListener("click", () => void disconnectManagedTrakt());
     byId("openDeleteProfileBtn").addEventListener("click", openDeleteProfileDialog);
     byId("cancelDeleteProfileBtn").addEventListener("click", closeDeleteProfileDialog);
@@ -2066,6 +2139,7 @@
     canExposePrivateInstall,
     clearPairingRecovery,
     createActivationRetryToken,
+    createManagementTraktSubmitter,
     createManagementProfileRequester,
     createProfileManagementApi,
     createOneShotSettlement,

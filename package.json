@@ -20,6 +20,7 @@
     "release-protocols": "node scripts/production-release-protocols.js apply-env",
     "secrets:generate": "node -e \"const {randomBytes}=require('node:crypto');const secret=()=>randomBytes(32).toString('base64url');const id='primary-'+new Date().getUTCFullYear();console.log('CONFIG_SECRET='+secret());console.log('JUMPGATE_TOKEN_PEPPER='+secret());console.log('JUMPGATE_ENVELOPE_PRIMARY_KEY_ID='+id);console.log('JUMPGATE_ENVELOPE_KEYRING='+JSON.stringify([{id,key:secret()}]));\"",
     "test": "node --test",
+    "test:browser:trakt": "node scripts/ci/node-test-gate.js --no-skips --expected-tests=1 -- scripts/ci/trakt-browser-smoke.js",
     "test:redis:subtitle": "node scripts/ci/node-test-gate.js --no-skips --expected-tests=9 -- --test-timeout=120000 test/storage-redis-subtitle-delivery.test.js",
     "test:redis:combined": "node scripts/ci/node-test-gate.js --no-skips --expected-tests=48 -- --test-timeout=120000 test/storage-redis-integration.test.js test/storage-redis-subtitle-delivery.test.js test/provider-snapshot-recovery-integration.test.js test/playback-claim-writer-protocol-redis.test.js",
     "policy": "node scripts/ci/repository-policy.js"
@@ -41,6 +42,7 @@
   },
   "devDependencies": {
     "markdown-it": "14.3.0",
+    "playwright": "1.62.0",
     "smol-toml": "1.7.0"
   }
 }

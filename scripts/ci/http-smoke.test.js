@@ -101,13 +101,17 @@ function completeHandler(options = {}) {
       return sendHealth(res, result.value, result.status, result.overrides);
     }
     if (req.url === "/version") {
-      return sendJson(res, {
-        version: "3.0.0",
-        major: 3,
-        minor: 0,
-        patch: 0,
-        buildSha: BUILD_SHA,
-      });
+      return sendJson(
+        res,
+        options.version || {
+          version: "3.0.0",
+          major: 3,
+          minor: 0,
+          patch: 0,
+          buildSha: BUILD_SHA,
+          capabilities: { managementTraktOAuth: "m1-m2-v1" },
+        }
+      );
     }
     if (req.url === "/manifest.json") {
       return sendJson(res, {
@@ -182,6 +186,47 @@ test("negative mode requires exact live and public-attestation not-ready contrac
     assert.equal(ordinaryRequests, 0);
   } finally {
     await close(fixture.server);
+  }
+});
+
+test("semantic smoke rejects missing or wrong management Trakt expansion capability", async (t) => {
+  const version = {
+    version: "3.0.0",
+    major: 3,
+    minor: 0,
+    patch: 0,
+    buildSha: BUILD_SHA,
+  };
+  const cases = [
+    ["missing capabilities", version],
+    ["missing capability member", { ...version, capabilities: {} }],
+    [
+      "wrong capability",
+      { ...version, capabilities: { managementTraktOAuth: "m1-only" } },
+    ],
+  ];
+
+  for (const [name, invalidVersion] of cases) {
+    await t.test(name, async () => {
+      let versionRequests = 0;
+      const fixture = await listen(
+        completeHandler({
+          version: invalidVersion,
+          onRequest: (request) => {
+            if (request.url === "/version") versionRequests += 1;
+          },
+        })
+      );
+      try {
+        const result = await runSmoke(fixture.baseUrl, { deadlineMs: 200 });
+        assert.notEqual(result.code, 0);
+        assert.equal(versionRequests > 0, true);
+        assert.doesNotMatch(result.stdout, /HTTP smoke passed/);
+        assert.match(result.stderr, /^HTTP smoke failed: /);
+      } finally {
+        await close(fixture.server);
+      }
+    });
   }
 });
 

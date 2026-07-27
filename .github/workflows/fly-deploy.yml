@@ -42,6 +42,7 @@ env:
   CONTAINER_NODE_IMAGE: node:24-alpine@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd
   CONTAINER_POSTGRES_IMAGE: postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
   CONTAINER_REDIS_IMAGE: redis:8.2-alpine@sha256:223b183cbc49f5ff48728e1fc52ccf101f05072decad2bd9867281a3c9bf75fd
+  PLAYWRIGHT_CONTAINER_IMAGE: mcr.microsoft.com/playwright:v1.62.0-noble@sha256:02bbb2155cd7109e3e9c741941097ed1608cf8b6fa44ee2595896da2bdc1f471
 
 jobs:
   quality:
@@ -109,6 +110,24 @@ jobs:
         run: git ls-files -z -- '*.js' | xargs -0 -r -n 1 node --check --
       - name: Run complete test suite
         run: node --test
+      - name: Run digest-pinned real-browser Trakt smoke
+        run: |
+          docker run --rm \
+            --network none \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,nosuid,nodev,size=128m \
+            --shm-size 256m \
+            --volume "$PWD:/work:ro" \
+            --workdir /work \
+            "$PLAYWRIGHT_CONTAINER_IMAGE" \
+            node scripts/ci/node-test-gate.js \
+              --no-skips \
+              --expected-tests=1 \
+              -- \
+              --test-timeout=120000 \
+              scripts/ci/trakt-browser-smoke.js
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high
       - name: Verify installation leaves tracked inputs unchanged

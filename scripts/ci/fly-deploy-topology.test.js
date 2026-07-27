@@ -37,6 +37,26 @@ const FINGERPRINT_PARITY_RUN =
   "  --no-skips \\\n" +
   "  -- \\\n" +
   "  test/source-fingerprint-fixtures.test.js\n";
+const PLAYWRIGHT_CONTAINER_IMAGE =
+  "mcr.microsoft.com/playwright:v1.62.0-noble@sha256:" +
+  "02bbb2155cd7109e3e9c741941097ed1608cf8b6fa44ee2595896da2bdc1f471";
+const TRAKT_BROWSER_SMOKE_RUN =
+  "docker run --rm \\\n" +
+  "  --network none \\\n" +
+  "  --read-only \\\n" +
+  "  --cap-drop ALL \\\n" +
+  "  --security-opt no-new-privileges \\\n" +
+  "  --tmpfs /tmp:rw,nosuid,nodev,size=128m \\\n" +
+  "  --shm-size 256m \\\n" +
+  '  --volume "$PWD:/work:ro" \\\n' +
+  "  --workdir /work \\\n" +
+  '  "$PLAYWRIGHT_CONTAINER_IMAGE" \\\n' +
+  "  node scripts/ci/node-test-gate.js \\\n" +
+  "    --no-skips \\\n" +
+  "    --expected-tests=1 \\\n" +
+  "    -- \\\n" +
+  "    --test-timeout=120000 \\\n" +
+  "    scripts/ci/trakt-browser-smoke.js\n";
 const DEPLOY_IF =
   "github.ref == 'refs/heads/main' && github.ref_protected == true && " +
   "(github.event_name == 'push' ||\n " +
@@ -90,6 +110,7 @@ const WORKFLOW_ENV = Object.freeze({
     "node:24-alpine@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd",
   CONTAINER_POSTGRES_IMAGE: POSTGRES_17_IMAGE,
   CONTAINER_REDIS_IMAGE: REDIS_8_IMAGE,
+  PLAYWRIGHT_CONTAINER_IMAGE,
 });
 const RELEASE_IF =
   "success() && github.ref == 'refs/heads/main' && github.ref_protected == true && " +
@@ -1349,6 +1370,23 @@ function validateWorkflow(source) {
     "archive-sha256": "${{ steps.export-image.outputs.archive-sha256 }}",
   });
   assert.deepEqual(job.steps, expectedContainerSmokeSteps());
+
+  const qualityJob = model.jobs.quality;
+  assert.ok(qualityJob, "quality job is required");
+  assert.equal(qualityJob.name, "Quality / Node 24");
+  const completeSuiteIndex = qualityJob.steps.findIndex(
+    (step) => step.name === "Run complete test suite"
+  );
+  const traktBrowserSmokeSteps = qualityJob.steps.filter(
+    (step) => step.name === "Run digest-pinned real-browser Trakt smoke"
+  );
+  assert.deepEqual(traktBrowserSmokeSteps, [
+    expectedJobStep("quality", ["name", "run"], {
+      name: "Run digest-pinned real-browser Trakt smoke",
+      run: TRAKT_BROWSER_SMOKE_RUN,
+    }),
+  ]);
+  assert.equal(qualityJob.steps.indexOf(traktBrowserSmokeSteps[0]), completeSuiteIndex + 1);
 
   const redisJob = model.jobs["redis-live"];
   assert.ok(redisJob, "redis-live job is required");
@@ -2734,6 +2772,29 @@ test("workflow structurally seals the Kodi version parity gate", () => {
       ),
     assert.AssertionError
   );
+});
+
+test("workflow structurally seals the real-browser Trakt smoke", () => {
+  const smokeStart = workflow.indexOf(
+    "      - name: Run digest-pinned real-browser Trakt smoke\n"
+  );
+  const smokeEnd = workflow.indexOf("      - name: Audit production dependencies\n", smokeStart);
+  assert.ok(smokeStart > -1 && smokeEnd > smokeStart);
+  const smokeBlock = workflow.slice(smokeStart, smokeEnd);
+  for (const mutated of [
+    replaceOnce(workflow, smokeBlock, ""),
+    replaceOnce(workflow, `  PLAYWRIGHT_CONTAINER_IMAGE: ${PLAYWRIGHT_CONTAINER_IMAGE}\n`, ""),
+    replaceOnce(workflow, PLAYWRIGHT_CONTAINER_IMAGE, PLAYWRIGHT_CONTAINER_IMAGE.replace(/.$/, "0")),
+    replaceOnce(workflow, "            --network none \\\n", "            --network bridge \\\n"),
+    replaceOnce(workflow, "            --read-only \\\n", ""),
+    replaceOnce(workflow, "            --cap-drop ALL \\\n", ""),
+    replaceOnce(workflow, "            --security-opt no-new-privileges \\\n", ""),
+    replaceOnce(workflow, '            --volume "$PWD:/work:ro" \\\n', ""),
+    replaceOnce(workflow, "              --no-skips \\\n", ""),
+    replaceOnce(workflow, smokeBlock, smokeBlock + smokeBlock),
+  ]) {
+    assert.throws(() => validateWorkflow(mutated), assert.AssertionError);
+  }
 });
 
 test("recording Docker shim proves the complete expanded immutable topology", async () => {
