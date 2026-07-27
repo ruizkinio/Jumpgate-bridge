@@ -38,7 +38,8 @@
     "yauzl": "3.4.0"
   },
   "allowScripts": {
-    "better-sqlite3@11.10.0": true
+    "better-sqlite3@11.10.0": true,
+    "fsevents@2.3.2": false
   },
   "devDependencies": {
     "markdown-it": "14.3.0",
