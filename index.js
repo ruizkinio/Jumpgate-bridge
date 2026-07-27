@@ -3516,12 +3516,10 @@ async function requireManagementTraktLaunchAuth(req, res, next) {
   }
   try {
     const sessionToken = getCookie(req, MANAGEMENT_SESSION_COOKIE);
-    const binding = sessionToken
-      ? await repositories().managementSessions.authenticate(
-          sessionToken,
-          req.managementFormCsrf
-        )
-      : null;
+    const binding = await repositories().managementSessions.authenticate(
+      sessionToken,
+      req.managementFormCsrf
+    );
     const profile = binding && binding.profileId
       ? await repositories().profiles.getById(binding.profileId)
       : null;
@@ -3909,9 +3907,6 @@ async function handleManagementTraktCallback(
   });
   res.setHeader("Cache-Control", "no-store");
   try {
-    if (!bindingToken) {
-      throw traktFenceError();
-    }
     const consumed = await repositories().oauthStates.consume(stateToken, bindingToken);
     if (!consumed || !consumed.payload || consumed.payload.kind !== "management-trakt-connect") {
       throw traktFenceError();
