@@ -37,6 +37,26 @@ const FINGERPRINT_PARITY_RUN =
   "  --no-skips \\\n" +
   "  -- \\\n" +
   "  test/source-fingerprint-fixtures.test.js\n";
+const PLAYWRIGHT_CONTAINER_IMAGE =
+  "mcr.microsoft.com/playwright:v1.62.0-noble@sha256:" +
+  "02bbb2155cd7109e3e9c741941097ed1608cf8b6fa44ee2595896da2bdc1f471";
+const TRAKT_BROWSER_SMOKE_RUN =
+  "docker run --rm \\\n" +
+  "  --network none \\\n" +
+  "  --read-only \\\n" +
+  "  --cap-drop ALL \\\n" +
+  "  --security-opt no-new-privileges \\\n" +
+  "  --tmpfs /tmp:rw,nosuid,nodev,size=128m \\\n" +
+  "  --shm-size 256m \\\n" +
+  '  --volume "$PWD:/work:ro" \\\n' +
+  "  --workdir /work \\\n" +
+  '  "$PLAYWRIGHT_CONTAINER_IMAGE" \\\n' +
+  "  node scripts/ci/node-test-gate.js \\\n" +
+  "    --no-skips \\\n" +
+  "    --expected-tests=1 \\\n" +
+  "    -- \\\n" +
+  "    --test-timeout=120000 \\\n" +
+  "    scripts/ci/trakt-browser-smoke.js\n";
 const DEPLOY_IF =
   "github.ref == 'refs/heads/main' && github.ref_protected == true && " +
   "(github.event_name == 'push' ||\n " +
@@ -50,7 +70,7 @@ const PROCESS_TREE_TERMINATION_GRACE_MS = process.platform === "win32" ? 7000 : 
 const PROCESS_TREE_FORCE_FINISH_MS = process.platform === "win32" ? 3500 : 5000;
 const PROCESS_TREE_TERMINATION_RETRY_MS = 1000;
 const WINDOWS_PROCESS_SNAPSHOT_TIMEOUT_MS = 2000;
-const WINDOWS_PROCESS_VERIFY_RETRY_MS = 25;
+const PROCESS_EXIT_VERIFY_RETRY_MS = 25;
 const MAX_UINT32 = 0xffffffff;
 const DEADLINE_READY_POLL_MS = 10;
 const EXPECTED_VERSION = require(path.join(ROOT, "package.json")).version;
@@ -90,6 +110,7 @@ const WORKFLOW_ENV = Object.freeze({
     "node:24-alpine@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd",
   CONTAINER_POSTGRES_IMAGE: POSTGRES_17_IMAGE,
   CONTAINER_REDIS_IMAGE: REDIS_8_IMAGE,
+  PLAYWRIGHT_CONTAINER_IMAGE,
 });
 const RELEASE_IF =
   "success() && github.ref == 'refs/heads/main' && github.ref_protected == true && " +
@@ -1350,6 +1371,23 @@ function validateWorkflow(source) {
   });
   assert.deepEqual(job.steps, expectedContainerSmokeSteps());
 
+  const qualityJob = model.jobs.quality;
+  assert.ok(qualityJob, "quality job is required");
+  assert.equal(qualityJob.name, "Quality / Node 24");
+  const completeSuiteIndex = qualityJob.steps.findIndex(
+    (step) => step.name === "Run complete test suite"
+  );
+  const traktBrowserSmokeSteps = qualityJob.steps.filter(
+    (step) => step.name === "Run digest-pinned real-browser Trakt smoke"
+  );
+  assert.deepEqual(traktBrowserSmokeSteps, [
+    expectedJobStep("quality", ["name", "run"], {
+      name: "Run digest-pinned real-browser Trakt smoke",
+      run: TRAKT_BROWSER_SMOKE_RUN,
+    }),
+  ]);
+  assert.equal(qualityJob.steps.indexOf(traktBrowserSmokeSteps[0]), completeSuiteIndex + 1);
+
   const redisJob = model.jobs["redis-live"];
   assert.ok(redisJob, "redis-live job is required");
   assert.deepEqual(redisJob.keys, [
@@ -1651,23 +1689,40 @@ function matchingWindowsProcessIdentities(expected, observed) {
   return matches;
 }
 
-async function waitForWindowsProcessIdentitiesToExit(expected, snapshot, timeoutMs) {
-  const deadline = performance.now() + timeoutMs;
+async function waitForWindowsProcessIdentitiesToExit(
+  expected,
+  snapshot,
+  deadline,
+  {
+    nowImplementation = () => performance.now(),
+    waitImplementation = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)),
+  } = {}
+) {
   while (expected.size > 0) {
-    const remainingMs = normalizeSpawnSyncTimeout(
-      deadline - performance.now(),
-      WINDOWS_PROCESS_SNAPSHOT_TIMEOUT_MS
-    );
-    const observed = normalizeWindowsProcessSnapshot(snapshot, [...expected.keys()], remainingMs);
-    const survivors = matchingWindowsProcessIdentities(expected, observed);
-    if (survivors.length === 0) return;
-    if (performance.now() >= deadline) {
+    const remainingBeforeSnapshotMs = deadline - nowImplementation();
+    if (remainingBeforeSnapshotMs <= 0) {
       throw cleanupFailure(
         "ECLEANUPRESIDUAL",
         "Windows process cleanup left a verified descendant alive."
       );
     }
-    await new Promise((resolve) => setTimeout(resolve, WINDOWS_PROCESS_VERIFY_RETRY_MS));
+    const remainingMs = normalizeSpawnSyncTimeout(
+      remainingBeforeSnapshotMs,
+      WINDOWS_PROCESS_SNAPSHOT_TIMEOUT_MS
+    );
+    const observed = normalizeWindowsProcessSnapshot(snapshot, [...expected.keys()], remainingMs);
+    const survivors = matchingWindowsProcessIdentities(expected, observed);
+    const remainingAfterSnapshotMs = deadline - nowImplementation();
+    if (remainingAfterSnapshotMs <= 0) {
+      throw cleanupFailure(
+        "ECLEANUPRESIDUAL",
+        "Windows process cleanup left a verified descendant alive."
+      );
+    }
+    if (survivors.length === 0) return;
+    await waitImplementation(
+      Math.min(PROCESS_EXIT_VERIFY_RETRY_MS, remainingAfterSnapshotMs)
+    );
   }
 }
 
@@ -1773,6 +1828,125 @@ function isProcessAlive(
   }
 }
 
+function isLinuxDeadProcessState(state) {
+  return state === "Z" || state === "X" || state === "x";
+}
+
+function parseLinuxProcessIdentity(stat, pid) {
+  if (typeof stat !== "string") return null;
+  const prefix = `${pid} (`;
+  if (!stat.startsWith(prefix)) return null;
+  const commandEnd = stat.lastIndexOf(")");
+  if (commandEnd < prefix.length || stat[commandEnd + 1] !== " ") return null;
+  const fields = stat.slice(commandEnd + 2).trim().split(/\s+/);
+  const state = fields[0];
+  const starttime = fields[19];
+  if (fields.length < 20 || !/^[A-Za-z]$/.test(state) || !/^\d+$/.test(starttime)) {
+    return null;
+  }
+  return { dead: isLinuxDeadProcessState(state), pid, starttime, state };
+}
+
+function snapshotLinuxProcessIdentities(
+  pids,
+  readProcessStatImplementation = (candidate) =>
+    fs.readFileSync(`/proc/${candidate}/stat`, "utf8")
+) {
+  const identities = new Map();
+  for (const pid of new Set(pids)) {
+    let stat;
+    try {
+      stat = readProcessStatImplementation(pid);
+    } catch (cause) {
+      if (cause?.code === "ENOENT" || cause?.code === "ESRCH") continue;
+      throw cleanupFailure("ECLEANUPIDENTITY", "Linux process identity capture failed.", cause);
+    }
+    const identity = parseLinuxProcessIdentity(stat, pid);
+    if (!identity) {
+      throw cleanupFailure("ECLEANUPIDENTITY", "Invalid Linux process identity.");
+    }
+    identities.set(pid, identity);
+  }
+  return identities;
+}
+
+function captureLinuxTerminationIdentities(
+  pids,
+  {
+    isProcessAliveImplementation = isProcessAlive,
+    readProcessStatImplementation,
+  } = {}
+) {
+  const recordedPids = [...new Set(pids)];
+  const observed = snapshotLinuxProcessIdentities(recordedPids, readProcessStatImplementation);
+  const unidentifiedLivePids = recordedPids.filter(
+    (pid) =>
+      !observed.has(pid) &&
+      isProcessAliveImplementation(pid, {
+        platform: "linux",
+        readProcessStat: readProcessStatImplementation,
+      })
+  );
+  if (unidentifiedLivePids.length > 0) {
+    throw cleanupFailure(
+      "ECLEANUPIDENTITY",
+      "Linux process identity capture was incomplete."
+    );
+  }
+  return new Map([...observed].filter(([, identity]) => !identity.dead));
+}
+
+function matchingLinuxProcessIdentities(expected, observed) {
+  const survivors = new Map();
+  for (const [pid, identity] of expected) {
+    const current = observed.get(pid);
+    if (current?.starttime === identity.starttime && !current.dead) {
+      survivors.set(pid, identity);
+    }
+  }
+  return survivors;
+}
+
+async function waitForLinuxProcessIdentitiesToExit(
+  expected,
+  deadline,
+  {
+    nowImplementation = () => performance.now(),
+    readProcessStatImplementation,
+    waitImplementation = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)),
+  } = {}
+) {
+  if (!(expected instanceof Map)) {
+    throw cleanupFailure("ECLEANUPIDENTITY", "Invalid Linux process identity capture.");
+  }
+  let survivors = new Map(expected);
+  while (survivors.size > 0) {
+    const remainingBeforeSnapshotMs = deadline - nowImplementation();
+    if (remainingBeforeSnapshotMs <= 0) {
+      throw cleanupFailure(
+        "ECLEANUPRESIDUAL",
+        "Linux process cleanup left a recorded descendant alive."
+      );
+    }
+    const observed = snapshotLinuxProcessIdentities(
+      [...survivors.keys()],
+      readProcessStatImplementation
+    );
+    survivors = matchingLinuxProcessIdentities(survivors, observed);
+    const remainingAfterSnapshotMs = deadline - nowImplementation();
+    if (remainingAfterSnapshotMs <= 0) {
+      throw cleanupFailure(
+        "ECLEANUPRESIDUAL",
+        "Linux process cleanup left a recorded descendant alive."
+      );
+    }
+    if (survivors.size === 0) return;
+    await waitImplementation(
+      Math.min(PROCESS_EXIT_VERIFY_RETRY_MS, remainingAfterSnapshotMs)
+    );
+  }
+}
+
 function spawnWithTreeDeadline(command, args, options) {
   const {
     deadlineMs,
@@ -1780,6 +1954,7 @@ function spawnWithTreeDeadline(command, args, options) {
     deadlineReadyTimeoutMs = deadlineMs,
     maxBuffer,
     processTreeForceFinishMs = PROCESS_TREE_FORCE_FINISH_MS,
+    processTreeNowImplementation = () => performance.now(),
     processTreeTerminationRetryMs = PROCESS_TREE_TERMINATION_RETRY_MS,
     spawnDeadlineChildImplementation = spawnDeadlineChild,
     terminateProcessTreeImplementation = terminateProcessTree,
@@ -1804,7 +1979,9 @@ function spawnWithTreeDeadline(command, args, options) {
     let forcedTimer = null;
     let finishing = false;
     let settled = false;
+    let terminationDeadline = null;
     let terminationIdentities = new Map();
+    let linuxTerminationIdentities = new Map();
     const terminationPids = new Set();
     const child = spawnDeadlineChildImplementation(command, args, {
       ...spawnOptions,
@@ -1816,12 +1993,12 @@ function spawnWithTreeDeadline(command, args, options) {
     const terminateOriginalTree = () =>
       terminateProcessTreeImplementation(child, processGroupId);
 
-    const clearTimers = () => {
+    const clearTimers = ({ preserveForcedTimer = false } = {}) => {
       if (deadlineTimer) clearTimeout(deadlineTimer);
       if (readyPoll) clearInterval(readyPoll);
       if (readyTimer) clearTimeout(readyTimer);
       if (retryTimer) clearTimeout(retryTimer);
-      if (forcedTimer) clearTimeout(forcedTimer);
+      if (forcedTimer && !preserveForcedTimer) clearTimeout(forcedTimer);
     };
     const recordCleanupError = (candidate) => {
       cleanupErrors.push(candidate);
@@ -1886,14 +2063,42 @@ function spawnWithTreeDeadline(command, args, options) {
     const finish = async (status, signal, closeObserved = true) => {
       if (settled || finishing) return;
       finishing = true;
-      clearTimers();
-      if (process.platform === "win32" && error && terminationIdentities.size > 0) {
+      clearTimers({ preserveForcedTimer: terminationDeadline !== null });
+      const terminationDeadlineExpired =
+        error &&
+        terminationDeadline !== null &&
+        processTreeNowImplementation() >= terminationDeadline;
+      if (terminationDeadlineExpired) {
+        recordCleanupError(
+          cleanupFailure(
+            "ECLEANUPTIMEOUT",
+            "Process-tree termination exceeded its absolute deadline."
+          )
+        );
+      } else if (error) {
         try {
-          await waitForWindowsProcessIdentitiesToExit(
-            terminationIdentities,
-            windowsProcessSnapshot,
-            PROCESS_TREE_FORCE_FINISH_MS
-          );
+          if (
+            process.platform === "win32" &&
+            terminationDeadline !== null &&
+            terminationIdentities.size > 0
+          ) {
+            await waitForWindowsProcessIdentitiesToExit(
+              terminationIdentities,
+              windowsProcessSnapshot,
+              terminationDeadline,
+              { nowImplementation: processTreeNowImplementation }
+            );
+          } else if (
+            process.platform === "linux" &&
+            terminationDeadline !== null &&
+            linuxTerminationIdentities.size > 0
+          ) {
+            await waitForLinuxProcessIdentitiesToExit(
+              linuxTerminationIdentities,
+              terminationDeadline,
+              { nowImplementation: processTreeNowImplementation }
+            );
+          }
         } catch (verificationError) {
           recordCleanupError(verificationError);
         }
@@ -1904,6 +2109,31 @@ function spawnWithTreeDeadline(command, args, options) {
       if (error || settled || finishing) return;
       // A leader can exit before descendants release inherited stdio and permit close.
       error = Object.assign(new Error("Topology test process deadline exceeded."), { code });
+      terminationDeadline = processTreeNowImplementation() + processTreeForceFinishMs;
+      forcedTimer = setTimeout(() => {
+        if (settled || finishing) return;
+        const terminalCleanupError = cleanupFailure(
+          "ECLEANUPTIMEOUT",
+          "Process-tree termination did not produce an observed close event."
+        );
+        cleanupErrors.push(terminalCleanupError);
+        cleanupError = terminalCleanupError;
+        if (process.platform === "win32") {
+          try {
+            terminateOriginalTree();
+          } catch (terminationError) {
+            recordCleanupError(
+              cleanupFailure(
+                "ECLEANUPTERMINATE",
+                "Final process-tree termination failed.",
+                terminationError
+              )
+            );
+          }
+        }
+        releaseChildReferences();
+        settle(undefined, undefined, false);
+      }, Math.max(0, terminationDeadline - processTreeNowImplementation()));
       try {
         for (const pid of readTerminationPids(terminationPidFiles)) terminationPids.add(pid);
         if (process.platform === "win32") {
@@ -1913,7 +2143,10 @@ function spawnWithTreeDeadline(command, args, options) {
           terminationIdentities = normalizeWindowsProcessSnapshot(
             windowsProcessSnapshot,
             requestedPids,
-            WINDOWS_PROCESS_SNAPSHOT_TIMEOUT_MS
+            normalizeSpawnSyncTimeout(
+              terminationDeadline - processTreeNowImplementation(),
+              WINDOWS_PROCESS_SNAPSHOT_TIMEOUT_MS
+            )
           );
           if (requestedPids.some((pid) => !terminationIdentities.has(pid))) {
             throw cleanupFailure(
@@ -1921,6 +2154,8 @@ function spawnWithTreeDeadline(command, args, options) {
               "Windows process identity capture was incomplete."
             );
           }
+        } else if (process.platform === "linux") {
+          linuxTerminationIdentities = captureLinuxTerminationIdentities(terminationPids);
         }
       } catch (captureError) {
         recordCleanupError(captureError);
@@ -1967,30 +2202,6 @@ function spawnWithTreeDeadline(command, args, options) {
           }
         }, processTreeTerminationRetryMs);
       }
-      forcedTimer = setTimeout(() => {
-        if (settled || finishing) return;
-        const terminalCleanupError = cleanupFailure(
-          "ECLEANUPTIMEOUT",
-          "Process-tree termination did not produce an observed close event."
-        );
-        cleanupErrors.push(terminalCleanupError);
-        cleanupError = terminalCleanupError;
-        if (process.platform === "win32") {
-          try {
-            terminateOriginalTree();
-          } catch (terminationError) {
-            recordCleanupError(
-              cleanupFailure(
-                "ECLEANUPTERMINATE",
-                "Final process-tree termination failed.",
-                terminationError
-              )
-            );
-          }
-        }
-        releaseChildReferences();
-        settle(undefined, undefined, false);
-      }, processTreeForceFinishMs);
     };
     const collect = (chunks, chunk, length, code) => {
       const nextLength = length + chunk.length;
@@ -2736,6 +2947,29 @@ test("workflow structurally seals the Kodi version parity gate", () => {
   );
 });
 
+test("workflow structurally seals the real-browser Trakt smoke", () => {
+  const smokeStart = workflow.indexOf(
+    "      - name: Run digest-pinned real-browser Trakt smoke\n"
+  );
+  const smokeEnd = workflow.indexOf("      - name: Audit production dependencies\n", smokeStart);
+  assert.ok(smokeStart > -1 && smokeEnd > smokeStart);
+  const smokeBlock = workflow.slice(smokeStart, smokeEnd);
+  for (const mutated of [
+    replaceOnce(workflow, smokeBlock, ""),
+    replaceOnce(workflow, `  PLAYWRIGHT_CONTAINER_IMAGE: ${PLAYWRIGHT_CONTAINER_IMAGE}\n`, ""),
+    replaceOnce(workflow, PLAYWRIGHT_CONTAINER_IMAGE, PLAYWRIGHT_CONTAINER_IMAGE.replace(/.$/, "0")),
+    replaceOnce(workflow, "            --network none \\\n", "            --network bridge \\\n"),
+    replaceOnce(workflow, "            --read-only \\\n", ""),
+    replaceOnce(workflow, "            --cap-drop ALL \\\n", ""),
+    replaceOnce(workflow, "            --security-opt no-new-privileges \\\n", ""),
+    replaceOnce(workflow, '            --volume "$PWD:/work:ro" \\\n', ""),
+    replaceOnce(workflow, "              --no-skips \\\n", ""),
+    replaceOnce(workflow, smokeBlock, smokeBlock + smokeBlock),
+  ]) {
+    assert.throws(() => validateWorkflow(mutated), assert.AssertionError);
+  }
+});
+
 test("recording Docker shim proves the complete expanded immutable topology", async () => {
   validateRecording(await runTopology(helper, { EXPECTED_VERSION: "9.9.9" }));
 });
@@ -2847,6 +3081,8 @@ test("delayed Windows verification uses valid sub-two-second spawnSync timeouts"
   const creationTime = "638890000000000000";
   const expected = new Map([[pid, { creationTime, parentPid: 0, pid }]]);
   const observedTimeouts = [];
+  const waits = [];
+  let now = 1000;
   let snapshots = 0;
   const snapshot = (pids, timeoutMs) => snapshotWindowsProcessIdentities(
     pids,
@@ -2863,14 +3099,30 @@ test("delayed Windows verification uses valid sub-two-second spawnSync timeouts"
     }
   );
 
-  await waitForWindowsProcessIdentitiesToExit(expected, snapshot, 40);
-  assert.equal(observedTimeouts.length >= 2, true);
-  assert.equal(
-    observedTimeouts.every((timeout) =>
-      Number.isInteger(timeout) && timeout > 0 && timeout <= 40 && timeout <= MAX_UINT32
+  await waitForWindowsProcessIdentitiesToExit(expected, snapshot, now + 40, {
+    nowImplementation: () => now,
+    waitImplementation: async (delayMs) => {
+      waits.push(delayMs);
+      now += delayMs;
+    },
+  });
+  assert.deepEqual(observedTimeouts, [40, 15]);
+  assert.deepEqual(waits, [PROCESS_EXIT_VERIFY_RETRY_MS]);
+  let strictClockReads = 0;
+  let strictSnapshots = 0;
+  await assert.rejects(
+    waitForWindowsProcessIdentitiesToExit(
+      expected,
+      () => {
+        strictSnapshots += 1;
+        return new Map();
+      },
+      1,
+      { nowImplementation: () => (strictClockReads++ === 0 ? 0 : 1) }
     ),
-    true
+    (error) => error.code === "ECLEANUPRESIDUAL"
   );
+  assert.equal(strictSnapshots, 1);
   assert.equal(normalizeSpawnSyncTimeout(0.01, 2000), 1);
   assert.equal(normalizeSpawnSyncTimeout(1.01, 2000), 2);
   assert.equal(normalizeSpawnSyncTimeout(MAX_UINT32 + 10, MAX_UINT32), MAX_UINT32);
@@ -2914,6 +3166,205 @@ test("process liveness treats only Linux dead states and ESRCH as terminated", (
     }),
     true
   );
+});
+
+function linuxProcessStatFixture(pid, { command = "node", starttime = "100", state = "S" } = {}) {
+  const fields = Array(20).fill("0");
+  fields[0] = state;
+  fields[1] = "1";
+  fields[2] = "1";
+  fields[19] = starttime;
+  return `${pid} (${command}) ${fields.join(" ")}\n`;
+}
+
+test("Linux process identities parse start time and dead state without command ambiguity", () => {
+  const pid = 2_000_000_101;
+  assert.deepEqual(
+    parseLinuxProcessIdentity(
+      linuxProcessStatFixture(pid, { command: "node ) worker", starttime: "987654", state: "S" }),
+      pid
+    ),
+    { dead: false, pid, starttime: "987654", state: "S" }
+  );
+  assert.deepEqual(
+    parseLinuxProcessIdentity(linuxProcessStatFixture(pid, { state: "Z" }), pid),
+    { dead: true, pid, starttime: "100", state: "Z" }
+  );
+  assert.equal(parseLinuxProcessIdentity(linuxProcessStatFixture(pid + 1), pid), null);
+  assert.equal(parseLinuxProcessIdentity(`${pid} (node) S 1 2`, pid), null);
+  assert.equal(
+    parseLinuxProcessIdentity(linuxProcessStatFixture(pid, { starttime: "not-a-number" }), pid),
+    null
+  );
+});
+
+test("Linux termination capture excludes dead and absent identities but rejects live ambiguity", () => {
+  const livePid = 2_000_000_102;
+  const deadPid = 2_000_000_103;
+  const absentPid = 2_000_000_104;
+  const readProcessStatImplementation = (pid) => {
+    if (pid === livePid) return linuxProcessStatFixture(pid, { starttime: "501" });
+    if (pid === deadPid) return linuxProcessStatFixture(pid, { starttime: "502", state: "Z" });
+    throw Object.assign(new Error("missing"), { code: "ENOENT" });
+  };
+  const captured = captureLinuxTerminationIdentities([livePid, deadPid, absentPid], {
+    isProcessAliveImplementation: () => false,
+    readProcessStatImplementation,
+  });
+
+  assert.deepEqual([...captured.keys()], [livePid]);
+  assert.equal(captured.get(livePid).starttime, "501");
+  assert.throws(
+    () =>
+      captureLinuxTerminationIdentities([absentPid], {
+        isProcessAliveImplementation: () => true,
+        readProcessStatImplementation,
+      }),
+    (error) => error.code === "ECLEANUPIDENTITY"
+  );
+});
+
+test("Linux descendant verification consumes only the remaining absolute budget", async () => {
+  const pid = 2_000_000_105;
+  const captured = new Map([[
+    pid,
+    parseLinuxProcessIdentity(linuxProcessStatFixture(pid, { starttime: "601" }), pid),
+  ]]);
+  let reads = 0;
+  const waits = [];
+  let now = 1000;
+
+  await waitForLinuxProcessIdentitiesToExit(captured, now + 30, {
+    nowImplementation: () => now,
+    readProcessStatImplementation: (candidate) => {
+      reads += 1;
+      if (reads === 1) {
+        return linuxProcessStatFixture(candidate, { starttime: "601" });
+      }
+      throw Object.assign(new Error("exited"), { code: "ENOENT" });
+    },
+    waitImplementation: async (delayMs) => {
+      waits.push(delayMs);
+      now += delayMs;
+    },
+  });
+
+  assert.equal(reads, 2);
+  assert.deepEqual(waits, [PROCESS_EXIT_VERIFY_RETRY_MS]);
+  assert.equal(now, 1025);
+});
+
+test("Linux descendant verification treats PID reuse as the original process exiting", async () => {
+  const pid = 2_000_000_106;
+  const captured = new Map([[
+    pid,
+    parseLinuxProcessIdentity(linuxProcessStatFixture(pid, { starttime: "701" }), pid),
+  ]]);
+  const waits = [];
+
+  await waitForLinuxProcessIdentitiesToExit(captured, 100, {
+    nowImplementation: () => 0,
+    readProcessStatImplementation: (candidate) =>
+      linuxProcessStatFixture(candidate, { starttime: "702" }),
+    waitImplementation: async (delayMs) => waits.push(delayMs),
+  });
+
+  assert.deepEqual(waits, []);
+});
+
+test("Linux descendant verification fails bounded when the same identity survives", async () => {
+  const pid = 2_000_000_107;
+  const captured = new Map([[
+    pid,
+    parseLinuxProcessIdentity(linuxProcessStatFixture(pid, { starttime: "801" }), pid),
+  ]]);
+  const deadline = PROCESS_EXIT_VERIFY_RETRY_MS + 7;
+  let reads = 0;
+  const waits = [];
+  let now = 0;
+
+  await assert.rejects(
+    waitForLinuxProcessIdentitiesToExit(captured, deadline, {
+      nowImplementation: () => now,
+      readProcessStatImplementation: (candidate) => {
+        reads += 1;
+        return linuxProcessStatFixture(candidate, { starttime: "801" });
+      },
+      waitImplementation: async (delayMs) => {
+        waits.push(delayMs);
+        now += delayMs;
+      },
+    }),
+    (error) => {
+      assert.equal(error.code, "ECLEANUPRESIDUAL");
+      assert.match(error.message, /recorded descendant alive/);
+      return true;
+    }
+  );
+
+  assert.equal(reads, 2);
+  assert.deepEqual(waits, [PROCESS_EXIT_VERIFY_RETRY_MS, 7]);
+  assert.equal(now, deadline);
+});
+
+test("Linux descendant verification rejects a result observed at the deadline", async () => {
+  const pid = 2_000_000_108;
+  const captured = new Map([[
+    pid,
+    parseLinuxProcessIdentity(linuxProcessStatFixture(pid, { starttime: "901" }), pid),
+  ]]);
+  let clockReads = 0;
+  let processReads = 0;
+
+  await assert.rejects(
+    waitForLinuxProcessIdentitiesToExit(captured, 1, {
+      nowImplementation: () => (clockReads++ === 0 ? 0 : 1),
+      readProcessStatImplementation: () => {
+        processReads += 1;
+        throw Object.assign(new Error("exited"), { code: "ENOENT" });
+      },
+    }),
+    (error) => error.code === "ECLEANUPRESIDUAL"
+  );
+  assert.equal(processReads, 1);
+});
+
+test("close at the absolute deadline fails closed without captured identities", async () => {
+  const events = [];
+  const child = createInjectedNoCloseChild(events);
+  const forceFinishMs = 40;
+  let now = 1000;
+  const context = await spawnWithTreeDeadline("injected-deadline-close", [], {
+    deadlineMs: 5,
+    env: process.env,
+    maxBuffer: 1024,
+    processTreeForceFinishMs: forceFinishMs,
+    processTreeNowImplementation: () => now,
+    processTreeTerminationRetryMs: forceFinishMs + 100,
+    spawnDeadlineChildImplementation: () => {
+      queueMicrotask(() => {
+        child.exitCode = 0;
+        events.push("exit:0:null");
+        child.emit("exit", 0, null);
+      });
+      return child;
+    },
+    terminateProcessTreeImplementation: () => {
+      events.push("terminate-root");
+      now += forceFinishMs;
+      queueMicrotask(() => child.emit("close", 0, null));
+      return true;
+    },
+  });
+
+  assert.equal(context.error?.code, "ETIMEDOUT");
+  assert.equal(context.cleanupError?.code, "ECLEANUPTIMEOUT");
+  assert.deepEqual(context.cleanupErrors.map(({ code }) => code), ["ECLEANUPTIMEOUT"]);
+  assert.equal(context.closeObserved, true);
+  assert.equal(context.status, 0);
+  assert.equal(context.signal, null);
+  assert.deepEqual(context.terminationPids, []);
+  assert.deepEqual(events, ["exit:0:null", "terminate-root"]);
 });
 
 test(

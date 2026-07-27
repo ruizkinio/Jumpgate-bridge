@@ -6,7 +6,7 @@ const net = require("node:net");
 const path = require("node:path");
 const zlib = require("zlib");
 const { version: BRIDGE_VERSION } = require("./package.json");
-const CONFIGURE_ASSET_REVISION = `${BRIDGE_VERSION}-r13`;
+const CONFIGURE_ASSET_REVISION = `${BRIDGE_VERSION}-r14`;
 const { PairingCoordinator } = require("./lib/pairing-coordinator");
 const { ClaimBoundHistoryService } = require("./lib/claim-bound-history-service");
 const { ProfileLifecycleService } = require("./lib/profile-lifecycle-service");
@@ -22,6 +22,13 @@ const { SubtitleDeliveryService } = require("./lib/subtitle-delivery-service");
 const { SubtitleDiscoveryService } = require("./lib/subtitle-discovery-service");
 const { SubtitleSource } = require("./lib/subtitle-source");
 const { TraktScrobbleService } = require("./lib/trakt-scrobble-service");
+const { resolveTraktAuthorizeUrl } = require("./lib/trakt-authorize-url");
+const {
+  MANAGEMENT_TRAKT_AJAX_PROTOCOL,
+  MANAGEMENT_TRAKT_EXPANSION_CAPABILITY,
+  MANAGEMENT_TRAKT_FORM_PROTOCOL,
+  resolveManagementTraktClientProtocol,
+} = require("./lib/management-trakt-client-protocol");
 const { createPublicBaseUrlResolver } = require("./lib/public-base-url");
 const {
   firstPublicArtworkUrl,
@@ -90,7 +97,8 @@ if (!TRAKT_CLIENT_SECRET) {
   }
   console.warn("WARNING: TRAKT_CLIENT_SECRET not set. Trakt OAuth/token refresh will be disabled.");
 }
-const TRAKT_AUTHORIZE_URL = "https://trakt.tv/oauth/authorize";
+const TRAKT_AUTHORIZE_URL = resolveTraktAuthorizeUrl(process.env);
+const TRAKT_AUTHORIZE_ORIGIN = new URL(TRAKT_AUTHORIZE_URL).origin;
 const TRAKT_TOKEN_URL =
   process.env.NODE_ENV === "test" && process.env.JUMPGATE_TEST_TRAKT_TOKEN_URL
     ? process.env.JUMPGATE_TEST_TRAKT_TOKEN_URL
@@ -109,7 +117,15 @@ const TRAKT_REFRESH_POLL_MS = 50;
 const REPOSITORY_WRITE_ATTEMPTS = 8;
 const MANAGEMENT_OAUTH_STATE_COOKIE = "jg_management_oauth_state";
 const MANAGEMENT_OAUTH_BINDING_COOKIE = "jg_management_oauth_binding";
-const OAUTH_PREFILL_TTL_SEC = 10 * 60;
+const MANAGEMENT_OAUTH_BINDING_COOKIE_PREFIX = "jg_management_oauth_binding_";
+const MANAGEMENT_OAUTH_STATE_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+const MANAGEMENT_OAUTH_COOKIE_SLOT_LENGTH = 22;
+const MANAGEMENT_TRAKT_CLIENT_PROTOCOL = resolveManagementTraktClientProtocol(process.env);
+const MANAGEMENT_TRAKT_IP_LAUNCH_LIMIT = process.env.NODE_ENV === "test" ? 10000 : 120;
+const MANAGEMENT_TRAKT_IP_LAUNCH_WINDOW_MS = 60 * 1000;
+const MANAGEMENT_TRAKT_LAUNCH_LIMIT = 8;
+const MANAGEMENT_TRAKT_LAUNCH_WINDOW_MS = 10 * 60 * 1000;
+let managementTraktIpLaunchLimit = MANAGEMENT_TRAKT_IP_LAUNCH_LIMIT;
 const MANAGEMENT_SESSION_COOKIE = "jg_management_session";
 const PAIR_POLL_INTERVAL_SEC = 2;
 const PROFILE_ID_BYTES = 16;
@@ -706,6 +722,36 @@ function isAllowedRequestOrigin(req) {
   }
 }
 
+function hasExactBrowserOrigin(req) {
+  const origin = req && req.headers ? req.headers.origin : "";
+  if (typeof origin !== "string" || !origin) return false;
+  try {
+    const parsed = new URL(origin);
+    return parsed.origin === origin && parsed.origin === getOriginValidationOrigin(req);
+  } catch (_error) {
+    return false;
+  }
+}
+
+function managementOAuthCookieSlot(stateToken) {
+  if (
+    typeof stateToken !== "string" ||
+    !MANAGEMENT_OAUTH_STATE_TOKEN_PATTERN.test(stateToken)
+  ) {
+    return "";
+  }
+  return crypto
+    .createHash("sha256")
+    .update(stateToken, "ascii")
+    .digest("base64url")
+    .slice(0, MANAGEMENT_OAUTH_COOKIE_SLOT_LENGTH);
+}
+
+function managementOAuthBindingCookieName(stateToken) {
+  const slot = managementOAuthCookieSlot(stateToken);
+  return slot ? MANAGEMENT_OAUTH_BINDING_COOKIE_PREFIX + slot : "";
+}
+
 function compareSemver(a, b) {
   const pa = a.split(".").map(Number);
   const pb = b.split(".").map(Number);
@@ -1121,7 +1167,9 @@ function extractConfigBlobFromBridgeBaseUrl(input) {
 function setConfigurePrivacyHeaders(res, scriptNonce) {
   res.setHeader("Cache-Control", "no-store");
   res.setHeader("Pragma", "no-cache");
-  res.setHeader("Referrer-Policy", "no-referrer");
+  // Chromium otherwise emits Origin: null for this page's synchronous form POST.
+  // same-origin keeps cross-origin referrers suppressed while preserving CSRF checks.
+  res.setHeader("Referrer-Policy", "same-origin");
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()");
   if (scriptNonce) {
@@ -1133,7 +1181,9 @@ function setConfigurePrivacyHeaders(res, scriptNonce) {
         "'; script-src-attr 'none'; style-src 'self'; style-src-attr 'none'; " +
         "img-src 'self' data: https:; font-src 'self'; " +
         "connect-src 'self' https://link.stremio.com https://api.strem.io; " +
-        "base-uri 'none'; form-action 'self' https://trakt.tv; frame-ancestors 'none'; object-src 'none'"
+        "base-uri 'none'; form-action 'self' " +
+        TRAKT_AUTHORIZE_ORIGIN +
+        "; frame-ancestors 'none'; object-src 'none'"
     );
   }
 }
@@ -1706,7 +1756,11 @@ function renderConfigurePage(req, res, opts) {
   const pairPrefill = options.pairPrefill || null;
   const replacements = Object.freeze({
     "@@JUMPGATE_ASSET_REVISION@@": CONFIGURE_ASSET_REVISION,
-    "@@JUMPGATE_BOOTSTRAP_JSON@@": safeJsonForScript({ initial: generated, pairPrefill }),
+    "@@JUMPGATE_BOOTSTRAP_JSON@@": safeJsonForScript({
+      initial: generated,
+      pairPrefill,
+      managementTraktConnect: MANAGEMENT_TRAKT_CLIENT_PROTOCOL,
+    }),
     "@@JUMPGATE_ERROR@@": options.error
       ? `<div class="msg err" role="alert">${escapeHtml(options.error)}</div>`
       : "",
@@ -1879,6 +1933,16 @@ if (process.env.NODE_ENV === "test") {
     }
     testTraktScrobbleDispatch = dispatch;
   };
+  app.setManagementTraktIpLaunchLimitForTest = (limit) => {
+    if (limit === null) {
+      managementTraktIpLaunchLimit = MANAGEMENT_TRAKT_IP_LAUNCH_LIMIT;
+      return;
+    }
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10000) {
+      throw new TypeError("test management Trakt IP launch limit is invalid");
+    }
+    managementTraktIpLaunchLimit = limit;
+  };
   app.historyCatalogLimitsForTest = Object.freeze({
     maxMetas: CONTINUE_CATALOG_MAX_METAS,
     maxScannedRecords: HISTORY_SCAN_MAX_RECORDS,
@@ -1947,7 +2011,9 @@ const globalRateLimiter = createRateLimitMiddleware({
   keyGenerator: rateLimitKey,
   hashClientKey: hashRateLimitClientKey,
   // Pairing uses polling by design; route-level limiters below handle it.
-  skip: (req) => String(req.path || "").startsWith("/pair/"),
+  skip: (req) =>
+    String(req.path || "").startsWith("/pair/") ||
+    (req.method === "POST" && req.path === "/api/profile/trakt/connect"),
   message: "Rate limit exceeded. Please retry in a moment.",
 });
 
@@ -2249,16 +2315,6 @@ function secureCookieForRequest(req) {
   } catch (_error) {
     return false;
   }
-}
-
-function clearManagementSessionCookie(req, res) {
-  setCookie(res, MANAGEMENT_SESSION_COOKIE, "", {
-    path: "/api/profile",
-    maxAgeSec: 0,
-    httpOnly: true,
-    secure: secureCookieForRequest(req),
-    sameSite: "Strict",
-  });
 }
 
 async function requireManagementAuth(req, res, next) {
@@ -3364,39 +3420,296 @@ app.delete(
   })
 );
 
+const parseManagementTraktConnectBody = express.urlencoded({
+  extended: false,
+  inflate: false,
+  limit: "1kb",
+  parameterLimit: 4,
+  type: "application/x-www-form-urlencoded",
+});
+
+function sendManagementTraktRedirect(res, kind, message) {
+  const params = new URLSearchParams({ [kind]: message });
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.status(303);
+  res.setHeader("Location", "/configure?" + params.toString());
+  return res.end();
+}
+
+function rejectManagementTraktLaunch(res, message) {
+  return sendManagementTraktRedirect(res, "error", message);
+}
+
+function isManagementTraktAjaxRequest(req) {
+  const headers = req && req.headers ? req.headers : {};
+  const contentLength = headers["content-length"];
+  return (
+    !headers["content-type"] &&
+    !headers["transfer-encoding"] &&
+    (contentLength === undefined || contentLength === "0") &&
+    typeof headers["x-jumpgate-csrf"] === "string" &&
+    Boolean(headers["x-jumpgate-csrf"].trim())
+  );
+}
+
+function classifyManagementTraktLaunch(req, _res, next) {
+  req.managementTraktProtocol = isManagementTraktAjaxRequest(req)
+    ? MANAGEMENT_TRAKT_AJAX_PROTOCOL
+    : MANAGEMENT_TRAKT_FORM_PROTOCOL;
+  next();
+}
+
+function rejectManagementTraktRequest(req, res, message, status, errorCode) {
+  if (req.managementTraktProtocol === MANAGEMENT_TRAKT_AJAX_PROTOCOL) {
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("Pragma", "no-cache");
+    return res.status(status || 400).json({
+      ok: false,
+      error: errorCode || "trakt_launch_failed",
+    });
+  }
+  return rejectManagementTraktLaunch(res, message);
+}
+
+function requireManagementTraktLaunchOrigin(req, res, next) {
+  if (!hasExactBrowserOrigin(req)) {
+    return rejectManagementTraktRequest(
+      req,
+      res,
+      "Unable to start Trakt from this page. Try again.",
+      403,
+      "origin_not_allowed"
+    );
+  }
+  next();
+}
+
+function parseManagementTraktLaunch(req, res, next) {
+  if (req.managementTraktProtocol === MANAGEMENT_TRAKT_AJAX_PROTOCOL) return next();
+  if (!req.is("application/x-www-form-urlencoded")) {
+    return rejectManagementTraktLaunch(res, "Unable to start Trakt from this page. Try again.");
+  }
+  return parseManagementTraktConnectBody(req, res, (error) => {
+    const body = req.body;
+    const fields = body && typeof body === "object" && !Array.isArray(body)
+      ? Object.keys(body)
+      : [];
+    if (
+      error ||
+      fields.length !== 1 ||
+      fields[0] !== "csrf" ||
+      typeof body.csrf !== "string" ||
+      !body.csrf
+    ) {
+      return rejectManagementTraktLaunch(res, "Unable to start Trakt from this page. Try again.");
+    }
+    req.managementFormCsrf = body.csrf;
+    next();
+  });
+}
+
+async function requireManagementTraktLaunchAuth(req, res, next) {
+  if (req.managementTraktProtocol === MANAGEMENT_TRAKT_AJAX_PROTOCOL) {
+    return requireManagementAuth(req, res, next);
+  }
+  try {
+    const sessionToken = getCookie(req, MANAGEMENT_SESSION_COOKIE);
+    const binding = await repositories().managementSessions.authenticate(
+      sessionToken,
+      req.managementFormCsrf
+    );
+    const profile = binding && binding.profileId
+      ? await repositories().profiles.getById(binding.profileId)
+      : null;
+    if (
+      !binding ||
+      !binding.profileId ||
+      !Number.isSafeInteger(binding.managementGeneration) ||
+      binding.managementGeneration < 0 ||
+      !profile ||
+      profile.status !== "active"
+    ) {
+      return rejectManagementTraktLaunch(res, "Pair Jumpgate again before connecting Trakt.");
+    }
+    req.managementBinding = {
+      profileId: binding.profileId,
+      managementGeneration: binding.managementGeneration,
+      sessionToken,
+      expiresAt: binding.expiresAt,
+    };
+    next();
+  } catch (_error) {
+    return rejectManagementTraktLaunch(res, "Pair Jumpgate again before connecting Trakt.");
+  }
+}
+
+async function applyManagementTraktLaunchRateLimit(
+  req,
+  res,
+  next,
+  scope,
+  clientSignal,
+  limit,
+  windowMs
+) {
+  try {
+    const clientKeyHash = hashRateLimitClientKey(clientSignal);
+    const result = await getRateLimitRepository().consume(
+      scope,
+      clientKeyHash,
+      limit,
+      windowMs
+    );
+    if (
+      !result ||
+      typeof result.allowed !== "boolean" ||
+      !Number.isSafeInteger(result.remaining) ||
+      result.remaining < 0 ||
+      result.remaining > limit ||
+      !Number.isSafeInteger(result.resetAt) ||
+      result.resetAt < 1
+    ) {
+      throw new Error("invalid Trakt launch rate-limit result");
+    }
+    const resetAfterSec = Math.max(1, Math.ceil((result.resetAt - Date.now()) / 1000));
+    res.setHeader(
+      "RateLimit-Policy",
+      String(limit) + ";w=" + String(Math.ceil(windowMs / 1000))
+    );
+    res.setHeader("RateLimit-Limit", String(limit));
+    res.setHeader("RateLimit-Remaining", String(result.remaining));
+    res.setHeader("RateLimit-Reset", String(resetAfterSec));
+    if (!result.allowed) {
+      res.setHeader("Retry-After", String(resetAfterSec));
+      return rejectManagementTraktRequest(
+        req,
+        res,
+        "Too many Trakt connection attempts. Wait briefly and try again.",
+        429,
+        "rate_limited"
+      );
+    }
+    next();
+  } catch (_error) {
+    return rejectManagementTraktRequest(
+      req,
+      res,
+      "Trakt connection is temporarily unavailable.",
+      503,
+      "trakt_unavailable"
+    );
+  }
+}
+
+async function requireManagementTraktLaunchIpRateLimit(req, res, next) {
+  return applyManagementTraktLaunchRateLimit(
+    req,
+    res,
+    next,
+    "management-trakt-launch-ip",
+    "ip:" + rateLimitKey(req),
+    managementTraktIpLaunchLimit,
+    MANAGEMENT_TRAKT_IP_LAUNCH_WINDOW_MS
+  );
+}
+
+async function requireManagementTraktLaunchRateLimit(req, res, next) {
+  return applyManagementTraktLaunchRateLimit(
+    req,
+    res,
+    next,
+    "management-trakt-launch",
+    "profile:" + req.managementBinding.profileId,
+    MANAGEMENT_TRAKT_LAUNCH_LIMIT,
+    MANAGEMENT_TRAKT_LAUNCH_WINDOW_MS
+  );
+}
+
 app.post(
   "/api/profile/trakt/connect",
-  asyncHandler(requireManagementAuth),
+  classifyManagementTraktLaunch,
+  asyncHandler(requireManagementTraktLaunchIpRateLimit),
+  requireManagementTraktLaunchOrigin,
+  parseManagementTraktLaunch,
+  asyncHandler(requireManagementTraktLaunchAuth),
+  asyncHandler(requireManagementTraktLaunchRateLimit),
   asyncHandler(async (req, res) => {
+    let issued = null;
     try {
       const profileId = req.managementBinding.profileId;
       const credential = await ensureTraktCredentialGeneration(profileId);
       const generation = readTraktGeneration(credential.credentials);
-      const issued = await repositories().oauthStates.issue(profileId, {
+      issued = await repositories().oauthStates.issue(profileId, {
         kind: "management-trakt-connect",
+        protocol: req.managementTraktProtocol,
         credentialGeneration: generation,
         credentialRevision: credential.revision,
       }, {
         managementGeneration: req.managementBinding.managementGeneration,
       });
+      if (!Number.isSafeInteger(issued.expiresAt) || issued.expiresAt <= Date.now()) {
+        throw new Error("Trakt OAuth state issuance was invalid");
+      }
       const secure = secureCookieForRequest(req);
-      setCookie(res, MANAGEMENT_OAUTH_STATE_COOKIE, issued.stateToken, {
-        path: "/api/profile/trakt/connect/continue",
-        maxAgeSec: OAUTH_PREFILL_TTL_SEC,
-        httpOnly: true,
-        secure,
-        sameSite: "Strict",
-      });
-      setCookie(res, MANAGEMENT_OAUTH_BINDING_COOKIE, issued.browserBindingToken, {
+      const maxAgeSec = Math.max(0, Math.floor((issued.expiresAt - Date.now()) / 1000));
+      if (req.managementTraktProtocol === MANAGEMENT_TRAKT_AJAX_PROTOCOL) {
+        setCookie(res, MANAGEMENT_OAUTH_STATE_COOKIE, issued.stateToken, {
+          path: "/api/profile/trakt/connect/continue",
+          maxAgeSec,
+          expiresAt: issued.expiresAt,
+          httpOnly: true,
+          secure,
+          sameSite: "Strict",
+        });
+        setCookie(res, MANAGEMENT_OAUTH_BINDING_COOKIE, issued.browserBindingToken, {
+          path: "/auth/trakt/callback",
+          maxAgeSec,
+          expiresAt: issued.expiresAt,
+          httpOnly: true,
+          secure,
+          sameSite: "Lax",
+        });
+        res.setHeader("Cache-Control", "no-store");
+        res.setHeader("Pragma", "no-cache");
+        return res.json({ ok: true, url: "/api/profile/trakt/connect/continue" });
+      }
+
+      const cookieName = managementOAuthBindingCookieName(issued.stateToken);
+      if (!cookieName) throw new Error("Trakt OAuth cookie slot was invalid");
+      setCookie(res, cookieName, issued.browserBindingToken, {
         path: "/auth/trakt/callback",
-        maxAgeSec: OAUTH_PREFILL_TTL_SEC,
+        maxAgeSec,
+        expiresAt: issued.expiresAt,
         httpOnly: true,
         secure,
         sameSite: "Lax",
       });
-      res.json({ ok: true, url: "/api/profile/trakt/connect/continue" });
+      const params = new URLSearchParams({
+        response_type: "code",
+        client_id: TRAKT_CLIENT_ID,
+        redirect_uri: getTraktRedirectUri(req),
+        state: "m2." + issued.stateToken,
+      });
+      res.setHeader("Cache-Control", "no-store");
+      res.setHeader("Pragma", "no-cache");
+      res.setHeader("Referrer-Policy", "no-referrer");
+      res.status(303);
+      res.setHeader("Location", TRAKT_AUTHORIZE_URL + "?" + params.toString());
+      return res.end();
     } catch (error) {
-      sendLifecycleApiFailure(res, error);
+      if (issued && issued.stateToken) {
+        await repositories().oauthStates.cancel(issued.stateToken).catch(() => {});
+      }
+      res.removeHeader("Set-Cookie");
+      return rejectManagementTraktRequest(
+        req,
+        res,
+        "Trakt connection is temporarily unavailable.",
+        503,
+        "trakt_unavailable"
+      );
     }
   })
 );
@@ -3411,9 +3724,10 @@ app.get("/api/profile/trakt/connect/continue", (req, res) => {
     sameSite: "Strict",
   });
   res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Pragma", "no-cache");
   res.setHeader("Referrer-Policy", "no-referrer");
-  if (!/^[A-Za-z0-9_-]{32,128}$/.test(stateToken)) {
-    return res.redirect("/configure?error=" + encodeURIComponent("Trakt connection state expired."));
+  if (!MANAGEMENT_OAUTH_STATE_TOKEN_PATTERN.test(stateToken)) {
+    return rejectManagementTraktLaunch(res, "Trakt connection state expired. Pair Jumpgate and start again.");
   }
   const params = new URLSearchParams({
     response_type: "code",
@@ -3421,7 +3735,9 @@ app.get("/api/profile/trakt/connect/continue", (req, res) => {
     redirect_uri: getTraktRedirectUri(req),
     state: "m1." + stateToken,
   });
-  return res.redirect(TRAKT_AUTHORIZE_URL + "?" + params.toString());
+  res.status(303);
+  res.setHeader("Location", TRAKT_AUTHORIZE_URL + "?" + params.toString());
+  return res.end();
 });
 
 app.delete(
@@ -3432,7 +3748,6 @@ app.delete(
       const result = await profileLifecycleService.requestErasure(
         req.managementBinding.profileId
       );
-      clearManagementSessionCookie(req, res);
       return res.status(202).json({
         ok: true,
         status: result.status === "deleted" ? "pending" : result.status,
@@ -3560,20 +3875,30 @@ app.post(
   asyncHandler(requireManagementAuth),
   asyncHandler(async (req, res) => {
     await repositories().managementSessions.revoke(req.managementBinding.sessionToken);
-    setCookie(res, MANAGEMENT_SESSION_COOKIE, "", {
-      path: "/api/profile",
-      maxAgeSec: 0,
-      httpOnly: true,
-      secure: secureCookieForRequest(req),
-      sameSite: "Strict",
-    });
     res.json({ ok: true });
   })
 );
 
-async function handleManagementTraktCallback(req, res, stateToken, code, oauthError) {
-  const bindingToken = getCookie(req, MANAGEMENT_OAUTH_BINDING_COOKIE);
-  setCookie(res, MANAGEMENT_OAUTH_BINDING_COOKIE, "", {
+async function handleManagementTraktCallback(
+  req,
+  res,
+  protocol,
+  stateToken,
+  code,
+  oauthError
+) {
+  const cookieName =
+    protocol === MANAGEMENT_TRAKT_AJAX_PROTOCOL
+      ? MANAGEMENT_OAUTH_BINDING_COOKIE
+      : managementOAuthBindingCookieName(stateToken);
+  if (!cookieName) {
+    return rejectManagementTraktLaunch(
+      res,
+      "Trakt connection state is invalid. Pair Jumpgate and start again."
+    );
+  }
+  const bindingToken = getCookie(req, cookieName);
+  setCookie(res, cookieName, "", {
     path: "/auth/trakt/callback",
     maxAgeSec: 0,
     httpOnly: true,
@@ -3582,11 +3907,17 @@ async function handleManagementTraktCallback(req, res, stateToken, code, oauthEr
   });
   res.setHeader("Cache-Control", "no-store");
   try {
-    if (!/^[A-Za-z0-9_-]{32,128}$/.test(stateToken) || !bindingToken) {
-      throw traktFenceError();
-    }
     const consumed = await repositories().oauthStates.consume(stateToken, bindingToken);
     if (!consumed || !consumed.payload || consumed.payload.kind !== "management-trakt-connect") {
+      throw traktFenceError();
+    }
+    if (
+      (protocol === MANAGEMENT_TRAKT_FORM_PROTOCOL &&
+        consumed.payload.protocol !== MANAGEMENT_TRAKT_FORM_PROTOCOL) ||
+      (protocol === MANAGEMENT_TRAKT_AJAX_PROTOCOL &&
+        consumed.payload.protocol !== undefined &&
+        consumed.payload.protocol !== MANAGEMENT_TRAKT_AJAX_PROTOCOL)
+    ) {
       throw traktFenceError();
     }
     const generation = consumed.payload.credentialGeneration;
@@ -3615,13 +3946,15 @@ async function handleManagementTraktCallback(req, res, stateToken, code, oauthEr
       expectedGeneration: generation,
       expectedRevision: revision,
     });
-    return res.redirect(
-      "/configure?notice=" + encodeURIComponent("Trakt connected. Pairing remains profile-scoped.")
+    return sendManagementTraktRedirect(
+      res,
+      "notice",
+      "Trakt connected. Pairing remains profile-scoped."
     );
   } catch (_error) {
-    return res.redirect(
-      "/configure?error=" +
-        encodeURIComponent("Trakt connection expired or the profile changed. Start again.")
+    return rejectManagementTraktLaunch(
+      res,
+      "Trakt connection expired or the profile changed. Start again."
     );
   }
 }
@@ -3631,12 +3964,31 @@ app.get("/auth/trakt/callback", async (req, res) => {
   const state = typeof req.query.state === "string" ? req.query.state : "";
   const oauthError = typeof req.query.error === "string" ? req.query.error : "";
 
-  if (state.startsWith("m1.")) {
-    return handleManagementTraktCallback(req, res, state.slice(3), code, oauthError);
+  const legacyManagementState = /^m1\.([A-Za-z0-9_-]{43})$/.exec(state);
+  if (legacyManagementState) {
+    return handleManagementTraktCallback(
+      req,
+      res,
+      MANAGEMENT_TRAKT_AJAX_PROTOCOL,
+      legacyManagementState[1],
+      code,
+      oauthError
+    );
   }
-  return res.redirect(
-    "/configure?error=" +
-      encodeURIComponent("Trakt connection state is invalid. Pair Jumpgate and start again.")
+  const formManagementState = /^m2\.([A-Za-z0-9_-]{43})$/.exec(state);
+  if (formManagementState) {
+    return handleManagementTraktCallback(
+      req,
+      res,
+      MANAGEMENT_TRAKT_FORM_PROTOCOL,
+      formManagementState[1],
+      code,
+      oauthError
+    );
+  }
+  return rejectManagementTraktLaunch(
+    res,
+    "Trakt connection state is invalid. Pair Jumpgate and start again."
   );
 });
 
@@ -3671,6 +4023,9 @@ function createVersionPayload(buildSha = BUILD_SHA) {
     minor: parts[1] || 0,
     patch: parts[2] || 0,
     buildSha,
+    capabilities: {
+      managementTraktOAuth: MANAGEMENT_TRAKT_EXPANSION_CAPABILITY,
+    },
   };
 }
 

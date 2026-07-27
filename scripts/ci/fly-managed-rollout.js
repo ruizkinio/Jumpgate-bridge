@@ -8,6 +8,8 @@ const { promisify } = require("node:util");
 
 const { parse } = require("smol-toml");
 
+const PACKAGE_VERSION = require("../../package.json").version;
+
 const execFileAsync = promisify(execFile);
 const IMAGE_PATTERN = /^registry\.fly\.io\/([a-z0-9-]+):git-([a-f0-9]{40})@(sha256:[a-f0-9]{64})$/;
 const MACHINE_ID_PATTERN = /^[a-f0-9]{14}$/;
@@ -15,6 +17,17 @@ const CLAIM_WRITER_ROLLOUT_ENV = "JUMPGATE_REDIS_PLAYBACK_CLAIM_ROLLOUT_MODE";
 const RELEASE_COMMAND = "node scripts/production-release-protocols.js apply-env";
 const PROTOCOL_STATUS_COMMAND = "node scripts/playback-claim-writer-protocol.js status";
 const PROTOCOL_STATUS_MARKER = "JUMPGATE_WRITER_PROTOCOL_STATUS_JSON=";
+const MACHINE_VERSION_COMMAND =
+  "node -e '" +
+  'const maximum=16384;fetch("http://127.0.0.1:7515/version",' +
+  '{redirect:"error",signal:AbortSignal.timeout(5000)}).then(async(response)=>{' +
+  'if(response.status!==200||!response.body)throw new Error();' +
+  'const reader=response.body.getReader();const chunks=[];let length=0;' +
+  'for(;;){const result=await reader.read();if(result.done)break;' +
+  'length+=result.value.byteLength;if(length>maximum)throw new Error();' +
+  'chunks.push(Buffer.from(result.value))}' +
+  'process.stdout.write(Buffer.concat(chunks,length))}).catch(()=>process.exit(1))' +
+  "'";
 const CANDIDATE_PROTOCOL_STATUS_COMMAND =
   "/bin/sh -lc '" +
   'status="$(' + PROTOCOL_STATUS_COMMAND + ')" || exit $?; ' +
@@ -40,6 +53,8 @@ const MAX_MACHINE_COMMAND_BYTES = 64 * 1024;
 const MACHINE_LIST_TIMEOUT_MS = 15_000;
 const MACHINE_START_TIMEOUT_MS = 60_000;
 const MAX_PROTOCOL_STATUS_BYTES = 16 * 1024;
+const MAX_MACHINE_VERSION_BYTES = 16 * 1024;
+const MACHINE_VERSION_PROBE_TIMEOUT_MS = 15_000;
 const PROTOCOL_PROBE_MACHINE_LIFETIME_SECONDS = 300;
 const PROTOCOL_PROBE_TIMEOUT_MS = 4 * 60 * 1000;
 
@@ -217,7 +232,7 @@ function assertDeployable(desired) {
 function parseImage(image, app) {
   const match = IMAGE_PATTERN.exec(image);
   requireCondition(match && match[1] === app, "immutable image reference is invalid");
-  return { value: image, digest: match[3] };
+  return { value: image, buildSha: match[2], digest: match[3] };
 }
 
 function machineProcessGroup(machine) {
@@ -703,14 +718,115 @@ async function readWriterProtocolStatus(flyctl, app, machineId, options = {}) {
   return parseProtocolStatusOutput(result.stdout);
 }
 
+function assertMachineVersion(value, expectedVersion, expectedBuildSha) {
+  requireCondition(
+    typeof expectedVersion === "string" &&
+      /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(expectedVersion),
+    "expected package version is invalid",
+    "fly_runtime_version_invalid"
+  );
+  requireCondition(
+    typeof expectedBuildSha === "string" && /^[a-f0-9]{40}$/.test(expectedBuildSha),
+    "expected build SHA is invalid",
+    "fly_runtime_version_invalid"
+  );
+  requireCondition(
+    isRecord(value),
+    "Machine runtime version is invalid",
+    "fly_runtime_version_invalid"
+  );
+  const parts = expectedVersion.split(".").map(Number);
+  requireCondition(
+    value.version === expectedVersion &&
+      value.major === parts[0] &&
+      value.minor === parts[1] &&
+      value.patch === parts[2],
+    "Machine runtime package version differs",
+    "fly_runtime_version_invalid"
+  );
+  requireCondition(
+    value.buildSha === expectedBuildSha,
+    "Machine runtime build SHA differs",
+    "fly_runtime_version_invalid"
+  );
+  requireCondition(
+    isRecord(value.capabilities) &&
+      value.capabilities.managementTraktOAuth === "m1-m2-v1",
+    "Machine runtime management capability differs",
+    "fly_runtime_version_invalid"
+  );
+  return value;
+}
+
+function parseMachineVersionOutput(stdout) {
+  requireCondition(
+    typeof stdout === "string" && Buffer.byteLength(stdout, "utf8") <= MAX_MACHINE_VERSION_BYTES,
+    "Machine runtime version output is invalid",
+    "fly_runtime_version_invalid"
+  );
+  const text = stdout.trim();
+  requireCondition(
+    text.length > 0 && !text.includes("\n") && !text.includes("\r"),
+    "Machine runtime version output is not a single record",
+    "fly_runtime_version_invalid"
+  );
+  try {
+    return JSON.parse(text);
+  } catch (_error) {
+    throw rolloutError("fly_runtime_version_invalid", "Machine runtime version output is invalid JSON");
+  }
+}
+
+async function readMachineVersion(flyctl, app, machineId, options = {}) {
+  exactString(flyctl, "FLYCTL_BIN");
+  requireCondition(/^[a-z0-9-]+$/.test(app), "Fly app is invalid");
+  exactMachineId(machineId);
+  const execute = options.execFile || execFileAsync;
+  requireCondition(typeof execute === "function", "Fly runtime version executor is invalid");
+  let result;
+  try {
+    result = await execute(
+      flyctl,
+      [
+        "ssh",
+        "console",
+        "--app",
+        app,
+        "--machine",
+        machineId,
+        "--command",
+        MACHINE_VERSION_COMMAND,
+        "--quiet",
+      ],
+      {
+        encoding: "utf8",
+        env: protocolProbeEnvironment(options.env || process.env),
+        maxBuffer: MAX_MACHINE_VERSION_BYTES,
+        timeout: MACHINE_VERSION_PROBE_TIMEOUT_MS,
+        windowsHide: true,
+      }
+    );
+  } catch (_error) {
+    throw rolloutError("fly_runtime_version_probe_failed", "Machine runtime version probe failed");
+  }
+  requireCondition(
+    isRecord(result),
+    "Machine runtime version probe reply is invalid",
+    "fly_runtime_version_probe_failed"
+  );
+  return parseMachineVersionOutput(result.stdout);
+}
+
 async function attestRepeatedly(options) {
   requireCondition(isRecord(options), "Fly attestation options are invalid");
   const desired = desiredStateForPhase(options.desired, options.phase);
+  const expectedImage = parseImage(options.image, desired.app);
   const intervals = exactInteger(options.intervals, "attestation intervals", 3, 12);
   const delayMs = exactInteger(options.delayMs, "attestation delay", 0, 60_000);
   requireCondition(typeof options.sample === "function", "Machine sampler is required");
   requireCondition(typeof options.externalProbe === "function", "external readiness probe is required");
   requireCondition(typeof options.protocolProbe === "function", "writer protocol probe is required");
+  requireCondition(typeof options.versionProbe === "function", "Machine runtime version probe is required");
   requireCondition(typeof options.sleep === "function", "attestation sleep is required");
   let stableIds = null;
   let protocolVersion = null;
@@ -720,9 +836,6 @@ async function attestRepeatedly(options) {
       desired,
       options.image
     );
-    const protocol = assertProtocolBoundary(await options.protocolProbe(ids[0]), options.phase);
-    protocolVersion = protocol.version;
-    await options.externalProbe();
     if (stableIds === null) {
       stableIds = ids;
     } else {
@@ -731,6 +844,19 @@ async function attestRepeatedly(options) {
         "serving Machine identities changed during attestation"
       );
     }
+    for (const machineId of ids) {
+      const protocol = assertProtocolBoundary(
+        await options.protocolProbe(machineId),
+        options.phase
+      );
+      protocolVersion = protocol.version;
+      assertMachineVersion(
+        await options.versionProbe(machineId),
+        PACKAGE_VERSION,
+        expectedImage.buildSha
+      );
+    }
+    await options.externalProbe();
     if (index + 1 < intervals) await options.sleep(delayMs);
   }
   return Object.freeze({
@@ -958,6 +1084,7 @@ async function main(args = process.argv.slice(2)) {
     sample: () => listMachines(flyctl, app),
     externalProbe: () => externalReadiness(baseUrl),
     protocolProbe: (machineId) => readWriterProtocolStatus(flyctl, app, machineId),
+    versionProbe: (machineId) => readMachineVersion(flyctl, app, machineId),
     sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
   });
   process.stdout.write(
@@ -983,12 +1110,15 @@ module.exports = {
   desiredStateForPhase,
   environmentWithoutRedisUrl,
   loadDesiredState,
+  MACHINE_VERSION_COMMAND,
   normalizeProtocolStatus,
   parseCandidateProtocolStatusOutput,
   parseProtocolStatusOutput,
   planWriterProtocolRollout,
   PROTOCOL_STATUS_MARKER,
+  assertMachineVersion,
   readCandidateWriterProtocolStatus,
+  readMachineVersion,
   readWriterProtocolStatus,
   startMachine,
   validateConvergenceSample,

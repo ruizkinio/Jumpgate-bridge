@@ -1,8 +1,10 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const { spawnSync } = require("node:child_process");
 const crypto = require("node:crypto");
 const http = require("node:http");
+const path = require("node:path");
 const { after, before, test } = require("node:test");
 const { fingerprintStream, hashOpaqueValue } = require("../lib/source-context");
 
@@ -310,36 +312,138 @@ async function settledWithin(promise, timeoutMs = 50) {
 }
 
 function responseCookie(response, name) {
-  const values = typeof response.headers.getSetCookie === "function"
-    ? response.headers.getSetCookie()
-    : [response.headers.get("set-cookie") || ""];
+  const values = responseSetCookies(response);
   const prefix = name + "=";
   const value = values.find((candidate) => candidate.startsWith(prefix));
   return value ? value.split(";", 1)[0] : "";
 }
 
-async function beginManagementTraktConnect(device) {
+async function requestFromLocalAddress(path, localAddress, options = {}) {
+  const address = server.address();
+  return new Promise((resolve, reject) => {
+    const outgoing = http.request(
+      {
+        host: "127.0.0.1",
+        port: address.port,
+        localAddress,
+        method: options.method || "GET",
+        path,
+        headers: options.headers || {},
+      },
+      (response) => {
+        const chunks = [];
+        response.on("data", (chunk) => chunks.push(chunk));
+        response.once("end", () => {
+          resolve({
+            status: response.statusCode,
+            headers: response.headers,
+            body: Buffer.concat(chunks).toString("utf8"),
+          });
+        });
+      }
+    );
+    outgoing.once("error", reject);
+    outgoing.end(options.body || "");
+  });
+}
+
+function responseSetCookies(response) {
+  return typeof response.headers.getSetCookie === "function"
+    ? response.headers.getSetCookie()
+    : [response.headers.get("set-cookie") || ""];
+}
+
+function responseCookieWithPrefix(response, prefix) {
+  const value = responseSetCookies(response).find((candidate) => candidate.startsWith(prefix));
+  return value ? value.split(";", 1)[0] : "";
+}
+
+function applyResponseCookies(jar, response) {
+  for (const value of responseSetCookies(response)) {
+    if (!value) continue;
+    const pair = value.split(";", 1)[0];
+    const separator = pair.indexOf("=");
+    if (separator <= 0) continue;
+    const name = pair.slice(0, separator);
+    const cookieValue = pair.slice(separator + 1);
+    if (!cookieValue || /(?:^|;)\s*Max-Age=0(?:;|$)/i.test(value)) jar.delete(name);
+    else jar.set(name, cookieValue);
+  }
+}
+
+function cookieJarHeader(jar) {
+  return [...jar].map(([name, value]) => `${name}=${value}`).join("; ");
+}
+
+async function postManagementTraktConnect(device, overrides = {}) {
   const headers = {
     cookie: device.managementCookie,
-    "x-jumpgate-csrf": device.managementCsrf,
+    origin: "https://jumpgate.test",
+    "content-type": "application/x-www-form-urlencoded",
+    ...(overrides.headers || {}),
   };
-  const started = await postJson("/api/profile/trakt/connect", {}, headers);
-  assert.equal(started.response.status, 200, JSON.stringify(started.body));
-  assert.deepEqual(started.body, { ok: true, url: "/api/profile/trakt/connect/continue" });
-  const stateCookie = responseCookie(started.response, "jg_management_oauth_state");
-  const bindingCookie = responseCookie(started.response, "jg_management_oauth_binding");
-  assert.match(stateCookie, /^jg_management_oauth_state=[A-Za-z0-9_-]{32,128}$/);
-  assert.match(bindingCookie, /^jg_management_oauth_binding=[A-Za-z0-9_-]{32,128}$/);
-
-  const continued = await request(started.body.url, {
-    headers: { cookie: stateCookie },
+  return request("/api/profile/trakt/connect", {
+    method: "POST",
+    headers,
+    body: overrides.body === undefined
+      ? new URLSearchParams({ csrf: device.managementCsrf }).toString()
+      : overrides.body,
     redirect: "manual",
   });
-  assert.equal(continued.response.status, 302);
-  const authorization = new URL(continued.response.headers.get("location"));
+}
+
+async function postLegacyManagementTraktConnect(device, overrides = {}) {
+  return request("/api/profile/trakt/connect", {
+    method: "POST",
+    headers: {
+      cookie: device.managementCookie,
+      origin: "https://jumpgate.test",
+      "x-jumpgate-csrf": device.managementCsrf,
+      ...(overrides.headers || {}),
+    },
+    redirect: "manual",
+  });
+}
+
+async function postManagementTraktConnectFromAddress(device, localAddress) {
+  const body = new URLSearchParams({ csrf: device.managementCsrf }).toString();
+  return requestFromLocalAddress("/api/profile/trakt/connect", localAddress, {
+    method: "POST",
+    headers: {
+      cookie: device.managementCookie,
+      origin: "https://jumpgate.test",
+      "content-type": "application/x-www-form-urlencoded",
+      "content-length": Buffer.byteLength(body),
+    },
+    body,
+  });
+}
+
+async function beginManagementTraktConnect(device) {
+  const started = await postManagementTraktConnect(device);
+  assert.equal(started.response.status, 303);
+  const authorization = new URL(started.response.headers.get("location"));
+  assert.equal(authorization.origin, "https://trakt.tv");
   const state = authorization.searchParams.get("state");
-  assert.match(state, /^m1\.[A-Za-z0-9_-]{32,128}$/);
-  return { authorization, bindingCookie, state };
+  assert.match(state, /^m2\.[A-Za-z0-9_-]{43}$/);
+  const bindingCookie = responseCookieWithPrefix(
+    started.response,
+    "jg_management_oauth_binding_"
+  );
+  assert.match(
+    bindingCookie,
+    /^jg_management_oauth_binding_[A-Za-z0-9_-]{22}=[A-Za-z0-9_-]{43}$/
+  );
+  const bindingCookieName = bindingCookie.split("=", 1)[0];
+  const setCookies = responseSetCookies(started.response);
+  assert.equal(setCookies.some((value) => value.startsWith("jg_management_oauth_state=")), false);
+  assert.match(setCookies.join("\n"), /Path=\/auth\/trakt\/callback/i);
+  assert.match(setCookies.join("\n"), /HttpOnly/i);
+  assert.match(setCookies.join("\n"), /SameSite=Lax/i);
+  assert.match(setCookies.join("\n"), /Expires=/i);
+  assert.match(setCookies.join("\n"), /Max-Age=(?:[0-9]|[1-5][0-9]{1,2}|600)/i);
+
+  return { authorization, bindingCookie, bindingCookieName, state, started };
 }
 
 function providerDescriptor(id = "org.example.streams") {
@@ -431,6 +535,7 @@ test("version is synchronized across runtime and manifests", async () => {
   assert.equal(manifest.response.status, 200);
   assert.equal(version.body.version, "3.0.0");
   assert.equal(version.body.buildSha, TEST_BUILD_SHA);
+  assert.equal(version.body.capabilities.managementTraktOAuth, "m1-m2-v1");
   assert.equal(manifest.body.version, version.body.version);
   assert.equal(require("../package.json").version, version.body.version);
   assert.equal(manifest.body.logo, "https://jumpgate.test/assets/jumpgate-mark.png");
@@ -443,10 +548,84 @@ test("version is synchronized across runtime and manifests", async () => {
     minor: 0,
     patch: 0,
     buildSha: null,
+    capabilities: {
+      managementTraktOAuth: "m1-m2-v1",
+    },
   });
   for (const invalid of [" ", TEST_BUILD_SHA.toUpperCase(), "a".repeat(39), "g".repeat(40)]) {
     assert.throws(() => app.parseBuildShaForTest(invalid), /invalid JUMPGATE_BUILD_SHA/);
   }
+});
+
+test("Trakt authorize overrides are loopback-only in tests and ignored in production", () => {
+  const probe = [
+    'const { resolveTraktAuthorizeUrl } = require("./lib/trakt-authorize-url");',
+    "const actual = resolveTraktAuthorizeUrl(process.env);",
+    "if (actual !== process.env.EXPECTED_TRAKT_AUTHORIZE_URL) process.exit(2);",
+  ].join("");
+  const run = (nodeEnv, override, expected) =>
+    spawnSync(process.execPath, ["-e", probe], {
+      cwd: path.join(__dirname, ".."),
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        NODE_ENV: nodeEnv,
+        JUMPGATE_TEST_TRAKT_AUTHORIZE_URL: override,
+        EXPECTED_TRAKT_AUTHORIZE_URL: expected,
+      },
+      windowsHide: true,
+    });
+
+  const loopback = "https://127.0.0.1:9443/oauth/authorize";
+  const accepted = run("test", loopback, loopback);
+  assert.equal(accepted.status, 0, accepted.stderr);
+
+  for (const invalid of [
+    "http://127.0.0.1:9443/oauth/authorize",
+    "https://localhost:9443/oauth/authorize",
+    "https://127.0.0.1:9443/not-authorize",
+    "https://user@127.0.0.1:9443/oauth/authorize",
+    "https://127.0.0.1:9443/oauth/authorize?scope=private",
+  ]) {
+    const rejected = run("test", invalid, loopback);
+    assert.notEqual(rejected.status, 0, invalid);
+    assert.match(rejected.stderr, /JUMPGATE_TEST_TRAKT_AUTHORIZE_URL/);
+  }
+
+  const production = run(
+    "production",
+    "https://attacker.example/not-authorize?state=ignored",
+    "https://trakt.tv/oauth/authorize"
+  );
+  assert.equal(production.status, 0, production.stderr);
+});
+
+test("Trakt form clients remain test-only until the explicit switch release", () => {
+  const {
+    resolveManagementTraktClientProtocol,
+  } = require("../lib/management-trakt-client-protocol");
+  assert.equal(resolveManagementTraktClientProtocol({}), "ajax-v1");
+  assert.equal(
+    resolveManagementTraktClientProtocol({
+      NODE_ENV: "production",
+      JUMPGATE_TEST_MANAGEMENT_TRAKT_CLIENT_PROTOCOL: "form-v2",
+    }),
+    "ajax-v1"
+  );
+  assert.equal(
+    resolveManagementTraktClientProtocol({
+      NODE_ENV: "test",
+      JUMPGATE_TEST_MANAGEMENT_TRAKT_CLIENT_PROTOCOL: "unknown",
+    }),
+    "ajax-v1"
+  );
+  assert.equal(
+    resolveManagementTraktClientProtocol({
+      NODE_ENV: "test",
+      JUMPGATE_TEST_MANAGEMENT_TRAKT_CLIENT_PROTOCOL: "form-v2",
+    }),
+    "form-v2"
+  );
 });
 
 test("GET /configure renders the canonical safe template under a per-response nonce", async () => {
@@ -457,7 +636,7 @@ test("GET /configure renders the canonical safe template under a per-response no
   assert.match(first.response.headers.get("content-type") || "", /^text\/html\b/i);
   assert.match(first.response.headers.get("cache-control") || "", /no-store/);
   assert.equal(first.response.headers.get("pragma"), "no-cache");
-  assert.equal(first.response.headers.get("referrer-policy"), "no-referrer");
+  assert.equal(first.response.headers.get("referrer-policy"), "same-origin");
   assert.equal(first.response.headers.get("x-content-type-options"), "nosniff");
 
   const csp = first.response.headers.get("content-security-policy") || "";
@@ -483,7 +662,7 @@ test("GET /configure renders the canonical safe template under a per-response no
     first.body
   );
   assert.ok(stylesheetRevision);
-  assert.equal(stylesheetRevision[1], `${require("../package.json").version}-r13`);
+  assert.equal(stylesheetRevision[1], `${require("../package.json").version}-r14`);
   const versionedScripts = [
     ...first.body.matchAll(
       /<script\b[^>]*src="\/assets\/(?:stremio-account-client|configure)\.js\?v=([A-Za-z0-9._-]+)"[^>]*><\/script>/g
@@ -580,6 +759,7 @@ test("GET /configure safely renders dynamic prefills, messages, and bootstrap da
   );
   assert.ok(bootstrapTag);
   const bootstrap = JSON.parse(bootstrapTag[2]);
+  assert.equal(bootstrap.managementTraktConnect, "ajax-v1");
   assert.equal(bootstrap.initial.name, name);
   assert.equal(bootstrap.initial.subtitleLanguages, "pt-br");
   assert.equal(bootstrap.initial.subtitlesEnabled, false);
@@ -1273,21 +1453,14 @@ test("legacy Trakt OAuth entry points cannot start an unfenced browser flow", as
     "/auth/trakt/callback?code=unused&state=v1.legacy-unfenced-state",
     { redirect: "manual" }
   );
-  assert.equal(legacyCallback.response.status, 302);
+  assert.equal(legacyCallback.response.status, 303);
   assert.match(legacyCallback.response.headers.get("location") || "", /Trakt.*start.*again/i);
 
   const config = await createConfig("Managed OAuth Only");
   const device = await pairDevice(config);
-  const managed = await postJson(
-    "/api/profile/trakt/connect",
-    {},
-    {
-      cookie: device.managementCookie,
-      "x-jumpgate-csrf": device.managementCsrf,
-    }
-  );
-  assert.equal(managed.response.status, 200, JSON.stringify(managed.body));
-  assert.deepEqual(managed.body, { ok: true, url: "/api/profile/trakt/connect/continue" });
+  const managed = await postManagementTraktConnect(device);
+  assert.equal(managed.response.status, 303);
+  assert.match(managed.response.headers.get("location"), /^https:\/\/trakt\.tv\//);
 });
 
 test("pair activation discloses no private capability when revocation wins final emission", async () => {
@@ -1541,41 +1714,324 @@ test("regeneration preserves the paired profile scope", async () => {
   assert.equal(claim.body.context.canonicalIdentity.id, "tt0133093");
 });
 
-test("management OAuth state is scope-free and rejects a different browser binding", async () => {
-  const first = await pairDevice(await generateConfig("OAuth Browser A"));
-  const second = await pairDevice(await generateConfig("OAuth Browser B"));
+test("expanded server preserves the cached AJAX m1 launch and callback contract", async () => {
+  const device = await pairDevice(await generateConfig("OAuth AJAX Compatibility"));
+  const repositorySet = await app.repositoriesForTest();
+  const before = repositorySet.oauthStates.storageSnapshot().length;
+
+  const wrongOrigin = await postLegacyManagementTraktConnect(device, {
+    headers: { origin: "https://attacker.example" },
+  });
+  assert.equal(wrongOrigin.response.status, 403);
+  assert.deepEqual(wrongOrigin.body, { ok: false, error: "origin_not_allowed" });
+  assert.equal(wrongOrigin.response.headers.get("set-cookie"), null);
+  assert.equal(repositorySet.oauthStates.storageSnapshot().length, before);
+
+  const started = await postLegacyManagementTraktConnect(device);
+  assert.equal(started.response.status, 200, JSON.stringify(started.body));
+  assert.deepEqual(started.body, {
+    ok: true,
+    url: "/api/profile/trakt/connect/continue",
+  });
+  assert.doesNotMatch(
+    JSON.stringify(started.body),
+    /m[12]\.|stateToken|binding|profileId|csrf/i
+  );
+  const stateCookie = responseCookie(started.response, "jg_management_oauth_state");
+  const bindingCookie = responseCookie(started.response, "jg_management_oauth_binding");
+  assert.match(stateCookie, /^jg_management_oauth_state=[A-Za-z0-9_-]{43}$/);
+  assert.match(bindingCookie, /^jg_management_oauth_binding=[A-Za-z0-9_-]{43}$/);
+  assert.equal(
+    responseSetCookies(started.response).some((value) =>
+      value.startsWith("jg_management_oauth_binding_")
+    ),
+    false
+  );
+  const stateToken = stateCookie.split("=", 2)[1];
+
+  const continued = await request(started.body.url, {
+    headers: { cookie: stateCookie },
+    redirect: "manual",
+  });
+  assert.equal(continued.response.status, 303);
+  assert.match(
+    responseSetCookies(continued.response).join("\n"),
+    /jg_management_oauth_state=;.*Max-Age=0/i
+  );
+  const authorization = new URL(continued.response.headers.get("location"));
+  assert.equal(authorization.origin, "https://trakt.tv");
+  assert.deepEqual(
+    [...authorization.searchParams.keys()].sort(),
+    ["client_id", "redirect_uri", "response_type", "state"]
+  );
+  assert.equal(authorization.searchParams.get("state"), "m1." + stateToken);
+
+  const callback = await request(
+    "/auth/trakt/callback?error=access_denied&state=" + encodeURIComponent("m1." + stateToken),
+    {
+      headers: { cookie: bindingCookie },
+      redirect: "manual",
+    }
+  );
+  assert.equal(callback.response.status, 303);
+  assert.match(callback.response.headers.get("location"), /^\/configure\?error=/);
+  assert.match(
+    responseSetCookies(callback.response).join("\n"),
+    /jg_management_oauth_binding=;.*Max-Age=0/i
+  );
+  assert.equal(
+    responseSetCookies(callback.response).some((value) =>
+      value.startsWith("jg_management_oauth_binding_")
+    ),
+    false
+  );
+});
+
+test("management Trakt navigation POST rejects unsafe requests before state issuance", async () => {
+  const device = await pairDevice(await generateConfig("OAuth Launch Rejections"));
+  const repositorySet = await app.repositoriesForTest();
+  const before = repositorySet.oauthStates.storageSnapshot().length;
+  const encodedCsrf = encodeURIComponent(device.managementCsrf);
+  const cases = [
+    {
+      name: "missing Origin",
+      headers: {
+        cookie: device.managementCookie,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: `csrf=${encodedCsrf}`,
+    },
+    {
+      name: "wrong Origin",
+      headers: {
+        cookie: device.managementCookie,
+        origin: "https://attacker.example",
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: `csrf=${encodedCsrf}`,
+    },
+    {
+      name: "Origin with path",
+      headers: {
+        cookie: device.managementCookie,
+        origin: "https://jumpgate.test/not-an-origin",
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: `csrf=${encodedCsrf}`,
+    },
+    {
+      name: "wrong content type",
+      headers: {
+        cookie: device.managementCookie,
+        origin: "https://jumpgate.test",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ csrf: device.managementCsrf }),
+    },
+    {
+      name: "header-only CSRF",
+      headers: {
+        cookie: device.managementCookie,
+        origin: "https://jumpgate.test",
+        "content-type": "application/x-www-form-urlencoded",
+        "x-jumpgate-csrf": device.managementCsrf,
+      },
+      body: "",
+    },
+    {
+      name: "duplicate CSRF fields",
+      headers: {
+        cookie: device.managementCookie,
+        origin: "https://jumpgate.test",
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: `csrf=${encodedCsrf}&csrf=${encodedCsrf}`,
+    },
+    {
+      name: "extra profile field",
+      headers: {
+        cookie: device.managementCookie,
+        origin: "https://jumpgate.test",
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: `csrf=${encodedCsrf}&profileId=other-profile`,
+    },
+    {
+      name: "wrong body CSRF despite valid header",
+      headers: {
+        cookie: device.managementCookie,
+        origin: "https://jumpgate.test",
+        "content-type": "application/x-www-form-urlencoded",
+        "x-jumpgate-csrf": device.managementCsrf,
+      },
+      body: "csrf=wrong",
+    },
+    {
+      name: "missing management session",
+      headers: {
+        origin: "https://jumpgate.test",
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: `csrf=${encodedCsrf}`,
+    },
+    {
+      name: "oversized body",
+      headers: {
+        cookie: device.managementCookie,
+        origin: "https://jumpgate.test",
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: "csrf=" + "x".repeat(2048),
+    },
+  ];
+
+  for (const item of cases) {
+    const rejected = await request("/api/profile/trakt/connect", {
+      method: "POST",
+      headers: item.headers,
+      body: item.body,
+      redirect: "manual",
+    });
+    assert.equal(rejected.response.status, 303, item.name);
+    const destination = new URL(
+      rejected.response.headers.get("location"),
+      "https://jumpgate.test"
+    );
+    assert.equal(destination.origin, "https://jumpgate.test", item.name);
+    assert.equal(destination.pathname, "/configure", item.name);
+    assert.deepEqual([...destination.searchParams.keys()], ["error"], item.name);
+    assert.equal(rejected.response.headers.get("set-cookie"), null, item.name);
+    assert.doesNotMatch(rejected.response.headers.get("content-type") || "", /json/i, item.name);
+  }
+  assert.equal(repositorySet.oauthStates.storageSnapshot().length, before);
+});
+
+test("management Trakt issue failures use a sanitized 303 without cookies", async () => {
+  const device = await pairDevice(await generateConfig("OAuth Issue Failure"));
+  const repositorySet = await app.repositoriesForTest();
+  const originalIssue = repositorySet.oauthStates.issue;
+  repositorySet.oauthStates.issue = async () => {
+    throw new Error("simulated issue failure");
+  };
+  try {
+    const rejected = await postManagementTraktConnect(device);
+    assert.equal(rejected.response.status, 303);
+    assert.match(rejected.response.headers.get("location"), /^\/configure\?error=/);
+    assert.equal(rejected.response.headers.get("set-cookie"), null);
+    assert.doesNotMatch(rejected.response.headers.get("content-type") || "", /json/i);
+  } finally {
+    repositorySet.oauthStates.issue = originalIssue;
+  }
+});
+
+test("management Trakt launch limiting is authenticated and profile-scoped", async () => {
+  const first = await pairDevice(await generateConfig("OAuth Limited Profile A"));
+  const second = await pairDevice(await generateConfig("OAuth Limited Profile B"));
+  const repositorySet = await app.repositoriesForTest();
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const allowed = await postManagementTraktConnect(first);
+    assert.equal(allowed.response.status, 303);
+    assert.match(allowed.response.headers.get("location"), /^https:\/\/trakt\.tv\//);
+  }
+  const issuedBeforeLimit = repositorySet.oauthStates.storageSnapshot().length;
+  const legacyLimited = await postLegacyManagementTraktConnect(first);
+  assert.equal(legacyLimited.response.status, 429);
+  assert.deepEqual(legacyLimited.body, { ok: false, error: "rate_limited" });
+  assert.equal(legacyLimited.response.headers.get("ratelimit-limit"), "8");
+  assert.equal(legacyLimited.response.headers.get("set-cookie"), null);
+  assert.equal(repositorySet.oauthStates.storageSnapshot().length, issuedBeforeLimit);
+
+  const limited = await postManagementTraktConnect(first);
+  assert.equal(limited.response.status, 303);
+  assert.match(limited.response.headers.get("location"), /^\/configure\?error=/);
+  assert.equal(limited.response.headers.get("ratelimit-limit"), "8");
+  assert.equal(limited.response.headers.get("set-cookie"), null);
+  assert.equal(repositorySet.oauthStates.storageSnapshot().length, issuedBeforeLimit);
+
+  const isolated = await postManagementTraktConnect(second);
+  assert.equal(isolated.response.status, 303);
+  assert.match(isolated.response.headers.get("location"), /^https:\/\/trakt\.tv\//);
+});
+
+test("management Trakt IP launch limiting isolates source addresses", async () => {
+  const device = await pairDevice(await generateConfig("OAuth IP Limited Profile"));
+  const repositorySet = await app.repositoriesForTest();
+  app.setManagementTraktIpLaunchLimitForTest(2);
+  try {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const allowed = await postManagementTraktConnectFromAddress(device, "127.0.0.2");
+      assert.equal(allowed.status, 303);
+      assert.match(allowed.headers.location, /^https:\/\/trakt\.tv\//);
+      assert.equal(allowed.headers["ratelimit-limit"], "8");
+    }
+
+    const issuedBeforeLimit = repositorySet.oauthStates.storageSnapshot().length;
+    const limited = await postManagementTraktConnectFromAddress(device, "127.0.0.2");
+    assert.equal(limited.status, 303);
+    assert.match(limited.headers.location, /^\/configure\?error=/);
+    assert.equal(limited.headers["ratelimit-limit"], "2");
+    assert.equal(limited.headers["set-cookie"], undefined);
+    assert.equal(repositorySet.oauthStates.storageSnapshot().length, issuedBeforeLimit);
+
+    const isolated = await postManagementTraktConnectFromAddress(device, "127.0.0.3");
+    assert.equal(isolated.status, 303);
+    assert.match(isolated.headers.location, /^https:\/\/trakt\.tv\//);
+    assert.equal(isolated.headers["ratelimit-limit"], "8");
+  } finally {
+    app.setManagementTraktIpLaunchLimitForTest(null);
+  }
+});
+
+test("slotted OAuth cookies support reversed callbacks and exact profile isolation", async () => {
+  const first = await pairDevice(await generateConfig("OAuth Slotted Profile A"));
+  const second = await pairDevice(await generateConfig("OAuth Slotted Profile B"));
   const firstFlow = await beginManagementTraktConnect(first);
   const secondFlow = await beginManagementTraktConnect(second);
   assert.equal(firstFlow.authorization.searchParams.has("scope"), false);
   assert.equal(secondFlow.authorization.searchParams.has("scope"), false);
   assert.notEqual(firstFlow.state, secondFlow.state);
-  assert.equal(firstFlow.state.includes("OAuth Browser A"), false);
+  assert.notEqual(firstFlow.bindingCookieName, secondFlow.bindingCookieName);
 
+  const jar = new Map();
+  applyResponseCookies(jar, firstFlow.started.response);
+  applyResponseCookies(jar, secondFlow.started.response);
+  assert.equal(jar.size, 2);
   let exchanges = 0;
-  app.setTraktAuthCodeExchangeForTest(async () => {
+  app.setTraktAuthCodeExchangeForTest(async (code) => {
     exchanges += 1;
     return {
-      access_token: "browser-bound-access",
-      refresh_token: "browser-bound-refresh",
+      access_token: `slotted-access-${code}`,
+      refresh_token: `slotted-refresh-${code}`,
       token_expiry: Math.floor(Date.now() / 1000) + 3600,
     };
   });
   try {
-    const rejected = await request(
-      `/auth/trakt/callback?code=wrong-browser&state=${encodeURIComponent(firstFlow.state)}`,
-      { headers: { cookie: secondFlow.bindingCookie }, redirect: "manual" }
+    const secondCallback = await request(
+      `/auth/trakt/callback?code=second&state=${encodeURIComponent(secondFlow.state)}`,
+      { headers: { cookie: cookieJarHeader(jar) }, redirect: "manual" }
     );
-    assert.equal(rejected.response.status, 302);
-    assert.match(rejected.response.headers.get("location"), /[?&]error=/);
-    assert.equal(exchanges, 0);
+    assert.equal(secondCallback.response.status, 303);
+    assert.match(secondCallback.response.headers.get("location"), /[?&]notice=/);
+    const secondClears = responseSetCookies(secondCallback.response);
+    assert.equal(secondClears.length, 1);
+    assert.match(secondClears[0], new RegExp(`^${secondFlow.bindingCookieName}=;`));
+    assert.equal(secondClears[0].includes(firstFlow.bindingCookieName), false);
+    applyResponseCookies(jar, secondCallback.response);
+    assert.equal(jar.has(firstFlow.bindingCookieName), true);
+    assert.equal(jar.has(secondFlow.bindingCookieName), false);
 
-    const accepted = await request(
-      `/auth/trakt/callback?code=right-browser&state=${encodeURIComponent(firstFlow.state)}`,
-      { headers: { cookie: firstFlow.bindingCookie }, redirect: "manual" }
+    const firstCallback = await request(
+      `/auth/trakt/callback?code=first&state=${encodeURIComponent(firstFlow.state)}`,
+      { headers: { cookie: cookieJarHeader(jar) }, redirect: "manual" }
     );
-    assert.equal(accepted.response.status, 302);
-    assert.match(accepted.response.headers.get("location"), /[?&]notice=/);
-    assert.equal(exchanges, 1);
+    assert.equal(firstCallback.response.status, 303);
+    assert.match(firstCallback.response.headers.get("location"), /[?&]notice=/);
+    const firstClears = responseSetCookies(firstCallback.response);
+    assert.equal(firstClears.length, 1);
+    assert.match(firstClears[0], new RegExp(`^${firstFlow.bindingCookieName}=;`));
+    applyResponseCookies(jar, firstCallback.response);
+    assert.equal(jar.size, 0);
+    assert.equal(exchanges, 2);
   } finally {
     app.setTraktAuthCodeExchangeForTest(null);
   }
@@ -1593,8 +2049,167 @@ test("management OAuth state is scope-free and rejects a different browser bindi
     },
   });
   assert.equal(firstStatus.body.traktLinked, true);
-  assert.equal(secondStatus.body.traktLinked, false);
-  assert.doesNotMatch(JSON.stringify(firstStatus.body), /browser-bound-(?:access|refresh)/);
+  assert.equal(secondStatus.body.traktLinked, true);
+});
+
+test("OAuth callback rejects a wrong binding and clears only the selected slot", async () => {
+  const first = await pairDevice(await generateConfig("OAuth Wrong Binding A"));
+  const second = await pairDevice(await generateConfig("OAuth Wrong Binding B"));
+  const firstFlow = await beginManagementTraktConnect(first);
+  const secondFlow = await beginManagementTraktConnect(second);
+  const secondBindingValue = secondFlow.bindingCookie.slice(
+    secondFlow.bindingCookie.indexOf("=") + 1
+  );
+  const cookies = [
+    `${firstFlow.bindingCookieName}=${secondBindingValue}`,
+    secondFlow.bindingCookie,
+  ].join("; ");
+  let exchanges = 0;
+  app.setTraktAuthCodeExchangeForTest(async () => {
+    exchanges += 1;
+    return {
+      access_token: "wrong-binding-access",
+      refresh_token: "wrong-binding-refresh",
+      token_expiry: Math.floor(Date.now() / 1000) + 3600,
+    };
+  });
+  try {
+    const rejected = await request(
+      `/auth/trakt/callback?code=wrong&state=${encodeURIComponent(firstFlow.state)}`,
+      { headers: { cookie: cookies }, redirect: "manual" }
+    );
+    assert.equal(rejected.response.status, 303);
+    assert.match(rejected.response.headers.get("location"), /[?&]error=/);
+    const clears = responseSetCookies(rejected.response);
+    assert.equal(clears.length, 1);
+    assert.match(clears[0], new RegExp(`^${firstFlow.bindingCookieName}=;`));
+    assert.equal(clears[0].includes(secondFlow.bindingCookieName), false);
+    assert.equal(exchanges, 0);
+  } finally {
+    app.setTraktAuthCodeExchangeForTest(null);
+  }
+});
+
+test("form-v2 callbacks never fall back to the fixed legacy binding cookie", async () => {
+  const device = await pairDevice(await generateConfig("OAuth Form Cookie Scheme"));
+  const flow = await beginManagementTraktConnect(device);
+  const unrelatedFlow = await beginManagementTraktConnect(device);
+  const flowBindingValue = flow.bindingCookie.slice(flow.bindingCookie.indexOf("=") + 1);
+  const unrelatedBindingValue = unrelatedFlow.bindingCookie.slice(
+    unrelatedFlow.bindingCookie.indexOf("=") + 1
+  );
+  const jar = new Map([
+    ["jg_management_oauth_binding", flowBindingValue],
+    [unrelatedFlow.bindingCookieName, unrelatedBindingValue],
+  ]);
+  let exchanges = 0;
+  app.setTraktAuthCodeExchangeForTest(async () => {
+    exchanges += 1;
+    throw new Error("unexpected Trakt token exchange");
+  });
+  try {
+    const rejected = await request(
+      `/auth/trakt/callback?code=wrong-scheme&state=${encodeURIComponent(flow.state)}`,
+      { headers: { cookie: cookieJarHeader(jar) }, redirect: "manual" }
+    );
+    assert.equal(rejected.response.status, 303);
+    assert.match(rejected.response.headers.get("location"), /[?&]error=/);
+    const clears = responseSetCookies(rejected.response);
+    assert.equal(clears.length, 1);
+    assert.match(clears[0], new RegExp(`^${flow.bindingCookieName}=;`));
+    applyResponseCookies(jar, rejected.response);
+    assert.equal(jar.has("jg_management_oauth_binding"), true);
+    assert.equal(jar.has(unrelatedFlow.bindingCookieName), true);
+    assert.equal(exchanges, 0);
+  } finally {
+    app.setTraktAuthCodeExchangeForTest(null);
+  }
+});
+
+test("ajax-v1 callbacks never fall back to slotted binding cookies", async () => {
+  const device = await pairDevice(await generateConfig("OAuth AJAX Cookie Scheme"));
+  const started = await postLegacyManagementTraktConnect(device);
+  assert.equal(started.response.status, 200, JSON.stringify(started.body));
+  const stateCookie = responseCookie(started.response, "jg_management_oauth_state");
+  const bindingCookie = responseCookie(started.response, "jg_management_oauth_binding");
+  const continued = await request(started.body.url, {
+    headers: { cookie: stateCookie },
+    redirect: "manual",
+  });
+  const state = new URL(continued.response.headers.get("location")).searchParams.get("state");
+  assert.match(state, /^m1\.[A-Za-z0-9_-]{43}$/);
+  const stateToken = state.slice(3);
+  const slottedCookieName = "jg_management_oauth_binding_" + crypto
+    .createHash("sha256")
+    .update(stateToken, "ascii")
+    .digest("base64url")
+    .slice(0, 22);
+  const jar = new Map([
+    [slottedCookieName, bindingCookie.slice(bindingCookie.indexOf("=") + 1)],
+  ]);
+  let exchanges = 0;
+  app.setTraktAuthCodeExchangeForTest(async () => {
+    exchanges += 1;
+    throw new Error("unexpected Trakt token exchange");
+  });
+  try {
+    const rejected = await request(
+      `/auth/trakt/callback?code=wrong-scheme&state=${encodeURIComponent(state)}`,
+      { headers: { cookie: cookieJarHeader(jar) }, redirect: "manual" }
+    );
+    assert.equal(rejected.response.status, 303);
+    assert.match(rejected.response.headers.get("location"), /[?&]error=/);
+    const clears = responseSetCookies(rejected.response);
+    assert.equal(clears.length, 1);
+    assert.match(clears[0], /^jg_management_oauth_binding=;/);
+    applyResponseCookies(jar, rejected.response);
+    assert.equal(jar.has(slottedCookieName), true);
+    assert.equal(exchanges, 0);
+  } finally {
+    app.setTraktAuthCodeExchangeForTest(null);
+  }
+});
+
+test("management OAuth state payload protocols cannot be relabeled", async () => {
+  const device = await pairDevice(await generateConfig("OAuth State Protocol Mismatch"));
+  const flow = await beginManagementTraktConnect(device);
+  const bindingValue = flow.bindingCookie.slice(flow.bindingCookie.indexOf("=") + 1);
+  const mismatchedState = "m1." + flow.state.slice(3);
+  let exchanges = 0;
+  app.setTraktAuthCodeExchangeForTest(async () => {
+    exchanges += 1;
+    throw new Error("unexpected Trakt token exchange");
+  });
+  try {
+    const rejected = await request(
+      `/auth/trakt/callback?code=wrong-protocol&state=${encodeURIComponent(mismatchedState)}`,
+      {
+        headers: { cookie: `jg_management_oauth_binding=${bindingValue}` },
+        redirect: "manual",
+      }
+    );
+    assert.equal(rejected.response.status, 303);
+    assert.match(rejected.response.headers.get("location"), /[?&]error=/);
+    const clears = responseSetCookies(rejected.response);
+    assert.equal(clears.length, 1);
+    assert.match(clears[0], /^jg_management_oauth_binding=;/);
+    assert.equal(exchanges, 0);
+  } finally {
+    app.setTraktAuthCodeExchangeForTest(null);
+  }
+});
+
+test("malformed management OAuth state cannot select or clear a cookie slot", async () => {
+  const device = await pairDevice(await generateConfig("OAuth Malformed State"));
+  const flow = await beginManagementTraktConnect(device);
+  const malformed = "m1." + "a".repeat(42) + ".unexpected";
+  const rejected = await request(
+    `/auth/trakt/callback?code=ignored&state=${encodeURIComponent(malformed)}`,
+    { headers: { cookie: flow.bindingCookie }, redirect: "manual" }
+  );
+  assert.equal(rejected.response.status, 303);
+  assert.match(rejected.response.headers.get("location"), /[?&]error=/);
+  assert.equal(rejected.response.headers.get("set-cookie"), null);
 });
 
 test("configured request logs omit client IPs", async () => {
@@ -3722,6 +4337,7 @@ test("profile provider APIs are CSRF-bound, isolated, encrypted, and revocable",
 
   const revoked = await postJson("/api/profile/session/revoke", {}, authHeadersA);
   assert.equal(revoked.response.status, 200);
+  assert.equal(revoked.response.headers.get("set-cookie"), null);
   const afterRevoke = await request("/api/profile/providers", { headers: authHeadersA });
   assert.equal(afterRevoke.response.status, 401);
 });
@@ -3917,7 +4533,7 @@ test("Trakt disconnect fences stale OAuth callbacks and permits only an explicit
     assert.deepEqual(disconnect.body, { ok: true, status: "disconnected" });
     release.resolve();
     const callback = await callbackPromise;
-    assert.equal(callback.response.status, 302);
+    assert.equal(callback.response.status, 303);
     assert.match(callback.response.headers.get("location"), /[?&]error=/);
   } finally {
     release.resolve();
@@ -3940,7 +4556,7 @@ test("Trakt disconnect fences stale OAuth callbacks and permits only an explicit
       `/auth/trakt/callback?code=fresh-code&state=${encodeURIComponent(reconnect.state)}`,
       { headers: { cookie: reconnect.bindingCookie }, redirect: "manual" }
     );
-    assert.equal(callback.response.status, 302);
+    assert.equal(callback.response.status, 303);
     assert.match(callback.response.headers.get("location"), /[?&]notice=/);
   } finally {
     app.setTraktAuthCodeExchangeForTest(null);
@@ -4030,6 +4646,53 @@ test("Trakt disconnect during an in-flight claim-bound event prevents config res
   assert.equal(serialized.includes(encryptedRefreshToken), false);
   assert.doesNotMatch(serialized, /access_token|refresh_token|client_id/i);
 });
+
+test("a delayed profile deletion response cannot clear a newly paired management session", async () => {
+  const oldDevice = await pairDevice(await createConfig("Delayed Delete Old Profile"));
+  const repositorySet = await app.repositoriesForTest();
+  const originalErase = repositorySet.profiles.erase;
+  const entered = deferred();
+  const release = deferred();
+  repositorySet.profiles.erase = async function (profileId) {
+    if (profileId === oldDevice.profileId) {
+      entered.resolve();
+      await release.promise;
+    }
+    return originalErase.apply(this, arguments);
+  };
+
+  let deletionPromise;
+  try {
+    deletionPromise = request("/api/profile", {
+      method: "DELETE",
+      headers: {
+        cookie: oldDevice.managementCookie,
+        "x-jumpgate-csrf": oldDevice.managementCsrf,
+        origin: "https://jumpgate.test",
+      },
+    });
+    await entered.promise;
+
+    const newDevice = await pairDevice(await createConfig("Delayed Delete New Profile"));
+    const newAuth = {
+      cookie: newDevice.managementCookie,
+      "x-jumpgate-csrf": newDevice.managementCsrf,
+      origin: "https://jumpgate.test",
+    };
+    assert.equal((await request("/api/profile/devices", { headers: newAuth })).response.status, 200);
+
+    release.resolve();
+    const deleted = await deletionPromise;
+    assert.equal(deleted.response.status, 202);
+    assert.equal(deleted.response.headers.get("set-cookie"), null);
+    assert.equal((await request("/api/profile/devices", { headers: newAuth })).response.status, 200);
+  } finally {
+    release.resolve();
+    if (deletionPromise) await deletionPromise.catch(() => {});
+    repositorySet.profiles.erase = originalErase;
+  }
+});
+
 test("profile deletion fences all auth and tombstones configured identities against reprovisioning", async () => {
   const config = await createConfig("Lifecycle Profile Erasure", upstreamBaseUrl);
   const deviceA = await pairDevice(config);
@@ -4058,13 +4721,7 @@ test("profile deletion fences all auth and tombstones configured identities agai
   const erased = await request("/api/profile", { method: "DELETE", headers: authA });
   assert.equal(erased.response.status, 202, JSON.stringify(erased.body));
   assert.deepEqual(erased.body, { ok: true, status: "pending" });
-  const clearedCookie = erased.response.headers.get("set-cookie") || "";
-  assert.match(clearedCookie, /jg_management_session=;/);
-  assert.match(clearedCookie, /Max-Age=0/i);
-  assert.match(clearedCookie, /Path=\/api\/profile/i);
-  assert.match(clearedCookie, /HttpOnly/i);
-  assert.match(clearedCookie, /Secure/i);
-  assert.match(clearedCookie, /SameSite=Strict/i);
+  assert.equal(erased.response.headers.get("set-cookie"), null);
 
   for (const device of [deviceA, deviceB]) {
     const rejected = await request(`/v1/history/${key}`, {

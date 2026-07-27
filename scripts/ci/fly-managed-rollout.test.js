@@ -7,16 +7,19 @@ const { test } = require("node:test");
 
 const {
   assertProtocolBoundary,
+  assertMachineVersion,
   assertDeployable,
   attestRepeatedly,
   CANDIDATE_PROTOCOL_STATUS_COMMAND,
   convergeFleet,
   desiredStateForPhase,
   loadDesiredState,
+  MACHINE_VERSION_COMMAND,
   parseCandidateProtocolStatusOutput,
   planWriterProtocolRollout,
   PROTOCOL_STATUS_MARKER,
   readCandidateWriterProtocolStatus,
+  readMachineVersion,
   startMachine,
   validateConvergenceSample,
   validateFleetSample,
@@ -27,6 +30,8 @@ const CONFIG = path.join(ROOT, "fly.toml");
 const IMAGE =
   "registry.fly.io/jumpgate-bridge:git-" + "a".repeat(40) + "@sha256:" + "b".repeat(64);
 const DIGEST = "sha256:" + "b".repeat(64);
+const BUILD_SHA = "a".repeat(40);
+const PACKAGE_VERSION = require(path.join(ROOT, "package.json")).version;
 const MACHINE_A = "0123456789abcd";
 const MACHINE_B = "1123456789abcd";
 const MACHINE_C = "2123456789abcd";
@@ -37,6 +42,19 @@ function protocolStatus(state, version) {
     changed: false,
     state,
     version,
+  };
+}
+
+function machineVersion(overrides = {}) {
+  const [major, minor, patch] = PACKAGE_VERSION.split(".").map(Number);
+  return {
+    version: PACKAGE_VERSION,
+    major,
+    minor,
+    patch,
+    buildSha: BUILD_SHA,
+    capabilities: { managementTraktOAuth: "m1-m2-v1" },
+    ...overrides,
   };
 }
 
@@ -263,11 +281,12 @@ test("phase-specific attestation cannot confuse transition and final v6 fleets",
   );
 });
 
-test("managed attestation samples service and external readiness across intervals", async () => {
+test("managed attestation probes both Machines and external readiness across intervals", async () => {
   const desired = loadDesiredState(CONFIG, "jumpgate-bridge");
   let samples = 0;
   let probes = 0;
-  let protocolProbes = 0;
+  const protocolProbes = [];
+  const versionProbes = [];
   let sleeps = 0;
   const result = await attestRepeatedly({
     desired,
@@ -283,9 +302,12 @@ test("managed attestation samples service and external readiness across interval
       probes += 1;
     },
     protocolProbe: async (machineId) => {
-      protocolProbes += 1;
-      assert.equal(machineId, MACHINE_A);
+      protocolProbes.push(machineId);
       return protocolStatus("ready", "6");
+    },
+    versionProbe: async (machineId) => {
+      versionProbes.push(machineId);
+      return machineVersion();
     },
     sleep: async () => {
       sleeps += 1;
@@ -297,8 +319,56 @@ test("managed attestation samples service and external readiness across interval
   assert.equal(result.protocolVersion, "6");
   assert.equal(samples, 3);
   assert.equal(probes, 3);
-  assert.equal(protocolProbes, 3);
+  assert.deepEqual(protocolProbes, [
+    MACHINE_A, MACHINE_B,
+    MACHINE_A, MACHINE_B,
+    MACHINE_A, MACHINE_B,
+  ]);
+  assert.deepEqual(versionProbes, [
+    MACHINE_A, MACHINE_B,
+    MACHINE_A, MACHINE_B,
+    MACHINE_A, MACHINE_B,
+  ]);
   assert.equal(sleeps, 2);
+});
+
+test("attestation rejects a missing or wrong management capability on either Machine", async () => {
+  const desired = loadDesiredState(CONFIG, "jumpgate-bridge");
+  const secret = "capability-secret-must-not-escape";
+  for (const capability of [undefined, secret]) {
+    const probed = [];
+    await assert.rejects(
+      attestRepeatedly({
+        desired,
+        phase: "v6",
+        image: IMAGE,
+        intervals: 3,
+        delayMs: 0,
+        sample: async () => [machine(MACHINE_A, desired), machine(MACHINE_B, desired)],
+        externalProbe: async () => {},
+        protocolProbe: async () => protocolStatus("ready", "6"),
+        versionProbe: async (machineId) => {
+          probed.push(machineId);
+          const version = machineVersion();
+          if (machineId === MACHINE_B) {
+            if (capability === undefined) {
+              delete version.capabilities.managementTraktOAuth;
+            } else {
+              version.capabilities.managementTraktOAuth = capability;
+            }
+          }
+          return version;
+        },
+        sleep: async () => {},
+      }),
+      (error) => {
+        assert.equal(error.code, "fly_runtime_version_invalid");
+        assert.equal(error.message.includes(secret), false);
+        return true;
+      }
+    );
+    assert.deepEqual(probed, [MACHINE_A, MACHINE_B]);
+  }
 });
 
 test("convergence starts only the exact stopped Machine and polls to passing", async () => {
@@ -583,6 +653,7 @@ test("attestation requires the exact Redis protocol at each rollout boundary", a
       },
       externalProbe: async () => {},
       protocolProbe: async () => protocolStatus("ready", "6"),
+      versionProbe: async () => machineVersion(),
       sleep: async () => {},
     }),
     (error) => error.code === "fly_protocol_boundary_invalid"
@@ -728,6 +799,53 @@ test("candidate command failure and ambiguous or invalid probe output stop rollo
       (error) => error.code === "fly_protocol_status_invalid"
     );
   }
+});
+
+test("Machine runtime version probe is targeted, bounded, exact, and secret-safe", async () => {
+  const desired = loadDesiredState(CONFIG, "jumpgate-bridge");
+  const redisUrl = "sensitive-runtime-value";
+  let invocation;
+  const version = await readMachineVersion("flyctl-test", desired.app, MACHINE_B, {
+    env: { FLY_API_TOKEN: "fly-token", REDIS_URL: redisUrl },
+    execFile: async (file, args, options) => {
+      invocation = { file, args, options };
+      return { stdout: JSON.stringify(machineVersion()), stderr: "" };
+    },
+  });
+
+  assert.deepEqual(assertMachineVersion(version, PACKAGE_VERSION, BUILD_SHA), machineVersion());
+  assert.equal(invocation.file, "flyctl-test");
+  assert.deepEqual(invocation.args, [
+    "ssh",
+    "console",
+    "--app",
+    desired.app,
+    "--machine",
+    MACHINE_B,
+    "--command",
+    MACHINE_VERSION_COMMAND,
+    "--quiet",
+  ]);
+  assert.match(MACHINE_VERSION_COMMAND, /127\.0\.0\.1:7515\/version/);
+  assert.equal(invocation.options.env.FLY_API_TOKEN, "fly-token");
+  assert.equal(Object.hasOwn(invocation.options.env, "REDIS_URL"), false);
+  assert.equal(invocation.options.maxBuffer, 16 * 1024);
+  assert.equal(invocation.options.timeout > 0, true);
+  assert.equal(JSON.stringify(invocation).includes(redisUrl), false);
+
+  await assert.rejects(
+    readMachineVersion("flyctl-test", desired.app, MACHINE_B, {
+      env: { FLY_API_TOKEN: "fly-token", REDIS_URL: redisUrl },
+      execFile: async () => {
+        throw new Error("remote command failed with " + redisUrl);
+      },
+    }),
+    (error) => {
+      assert.equal(error.code, "fly_runtime_version_probe_failed");
+      assert.equal(error.message.includes(redisUrl), false);
+      return true;
+    }
+  );
 });
 
 test("workflow probes first, conditionally transitions, and always finishes on v6 in order", () => {
