@@ -586,6 +586,9 @@ test("Trakt authorize overrides are loopback-only in tests and ignored in produc
     "https://127.0.0.1:9443/not-authorize",
     "https://user@127.0.0.1:9443/oauth/authorize",
     "https://127.0.0.1:9443/oauth/authorize?scope=private",
+    "https://127.0.0.1:9443/oauth/authorize?",
+    "https://127.0.0.1:9443/oauth/authorize#",
+    "https://127.0.0.1:9443/oauth/authorize?#",
   ]) {
     const rejected = run("test", invalid, loopback);
     assert.notEqual(rejected.status, 0, invalid);
@@ -636,7 +639,7 @@ test("GET /configure renders the canonical safe template under a per-response no
   assert.match(first.response.headers.get("content-type") || "", /^text\/html\b/i);
   assert.match(first.response.headers.get("cache-control") || "", /no-store/);
   assert.equal(first.response.headers.get("pragma"), "no-cache");
-  assert.equal(first.response.headers.get("referrer-policy"), "same-origin");
+  assert.equal(first.response.headers.get("referrer-policy"), "strict-origin");
   assert.equal(first.response.headers.get("x-content-type-options"), "nosniff");
 
   const csp = first.response.headers.get("content-security-policy") || "";
@@ -2242,6 +2245,26 @@ test("configured request logs omit client IPs", async () => {
   }
   assert.equal(messages.some((line) => line.includes("<redacted>/<redacted>.json")), true);
   assert.equal(messages.some((line) => line.includes("pos=") || line.includes("dur=") || line.includes("%")), false);
+});
+
+test("configured configure request logs redact query and canonical capabilities", async () => {
+  const config = await createConfig("Configure Log Privacy");
+  const messages = [];
+  const original = console.log;
+  console.log = (...args) => messages.push(args.join(" "));
+  try {
+    await request("/configure?config=" + encodeURIComponent(config));
+    await request("/_c/" + config + "/configure");
+  } finally {
+    console.log = original;
+  }
+
+  assert.equal(messages.some((line) => line.includes(config)), false);
+  assert.equal(messages.some((line) => line === "[REQ] GET /configure"), true);
+  assert.equal(
+    messages.some((line) => line === "[REQ] GET /_c/<redacted>/configure"),
+    true
+  );
 });
 
 test("history request logs redact content keys", async () => {

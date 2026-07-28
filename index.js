@@ -22,7 +22,10 @@ const { SubtitleDeliveryService } = require("./lib/subtitle-delivery-service");
 const { SubtitleDiscoveryService } = require("./lib/subtitle-discovery-service");
 const { SubtitleSource } = require("./lib/subtitle-source");
 const { TraktScrobbleService } = require("./lib/trakt-scrobble-service");
-const { resolveTraktAuthorizeUrl } = require("./lib/trakt-authorize-url");
+const {
+  buildTraktAuthorizeUrl,
+  resolveTraktAuthorizeUrl,
+} = require("./lib/trakt-authorize-url");
 const {
   MANAGEMENT_TRAKT_AJAX_PROTOCOL,
   MANAGEMENT_TRAKT_EXPANSION_CAPABILITY,
@@ -1167,9 +1170,8 @@ function extractConfigBlobFromBridgeBaseUrl(input) {
 function setConfigurePrivacyHeaders(res, scriptNonce) {
   res.setHeader("Cache-Control", "no-store");
   res.setHeader("Pragma", "no-cache");
-  // Chromium otherwise emits Origin: null for this page's synchronous form POST.
-  // same-origin keeps cross-origin referrers suppressed while preserving CSRF checks.
-  res.setHeader("Referrer-Policy", "same-origin");
+  // Preserve an exact form Origin without disclosing capability-bearing paths or queries.
+  res.setHeader("Referrer-Policy", "strict-origin");
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()");
   if (scriptNonce) {
@@ -3696,7 +3698,7 @@ app.post(
       res.setHeader("Pragma", "no-cache");
       res.setHeader("Referrer-Policy", "no-referrer");
       res.status(303);
-      res.setHeader("Location", TRAKT_AUTHORIZE_URL + "?" + params.toString());
+      res.setHeader("Location", buildTraktAuthorizeUrl(TRAKT_AUTHORIZE_URL, params));
       return res.end();
     } catch (error) {
       if (issued && issued.stateToken) {
@@ -3736,7 +3738,7 @@ app.get("/api/profile/trakt/connect/continue", (req, res) => {
     state: "m1." + stateToken,
   });
   res.status(303);
-  res.setHeader("Location", TRAKT_AUTHORIZE_URL + "?" + params.toString());
+  res.setHeader("Location", buildTraktAuthorizeUrl(TRAKT_AUTHORIZE_URL, params));
   return res.end();
 });
 
