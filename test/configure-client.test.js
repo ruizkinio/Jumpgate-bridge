@@ -1942,8 +1942,20 @@ test("install stage preserves Android external-player setup guidance", () => {
   );
 
   assert.ok(guidance, "playback guidance container must remain present");
-  assert.match(guidance[0], /Settings &gt; Playback &gt; Default player<\/strong> to <strong>External player/i);
-  assert.match(guidance[0], /Select Jumpgate when Android asks/i);
+  const instructionList = guidance[0].match(
+    /<ol class="player-setup-list">([\s\S]*?)<\/ol>/i
+  );
+  assert.ok(instructionList, "ordered playback instructions must remain present");
+  const instructions = [...instructionList[1].matchAll(/<li>([\s\S]*?)<\/li>/gi)].map((match) =>
+    match[1].replace(/<[^>]+>/g, " ").replace(/&gt;/g, ">").replace(/\s+/g, " ").trim()
+  );
+
+  assert.equal(instructions.length, 4);
+  assert.match(instructions[0], /install the generated Jumpgate addon in Stremio/i);
+  assert.match(instructions[0], /keep its private install link to yourself/i);
+  assert.match(instructions[1], /Settings > Playback > Default player to External player/i);
+  assert.match(instructions[2], /In Stremio, start a Jumpgate source/i);
+  assert.match(instructions[3], /Android opens the player chooser, select Jumpgate/i);
   assert.match(guidance[0], /Use <strong>Just once<\/strong> while testing/i);
   assert.match(guidance[0], /<strong>Always<\/strong> can affect matching launches from other apps/i);
   assert.match(guidance[0], /different stream scheme may ask again/i);
@@ -1955,8 +1967,6 @@ test("install stage preserves Android external-player setup guidance", () => {
   assert.match(guidance[0], /Toggling Stremio's player setting does not clear Android's remembered external app/i);
   assert.match(guidance[0], /Do not clear Stremio app data or sign out/i);
   assert.match(guidance[0], /class="profile-note player-setup-note"[^>]*role="note"/);
-  assert.match(guidance[0], /<ol class="player-setup-list">/);
-  assert.equal((guidance[0].match(/<li>/g) || []).length, 2);
   assert.match(html, /<section class="stage-block install-stage"[^>]*aria-describedby="installPrivacy"/);
   assert.match(html, /<input id="install"[^>]*aria-describedby="installPrivacy"/);
   assert.match(html, /<input id="installManifest"[^>]*aria-describedby="installPrivacy"/);
