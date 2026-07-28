@@ -93,18 +93,47 @@ async function close(server) {
   );
 }
 
-test("real Chromium proves the expanded AJAX m1 and native-form m2 Trakt launches", {
+function installNativeFormProbe({ binding, buttonId, connectPath }) {
+  let clickCount = 0;
+  let nativeSubmitCount = 0;
+  const record = (event) => {
+    void window[binding](event);
+  };
+  document.addEventListener("click", (event) => {
+    const button = event.target && event.target.closest
+      ? event.target.closest("#" + buttonId)
+      : null;
+    if (!button) return;
+    clickCount += 1;
+    record({ clickCount, kind: "click" });
+  }, true);
+
+  const nativeSubmit = HTMLFormElement.prototype.submit;
+  HTMLFormElement.prototype.submit = function submit() {
+    nativeSubmitCount += 1;
+    record({
+      actionMatches: new URL(this.action, document.baseURI).pathname === connectPath,
+      connected: this.isConnected,
+      kind: "native-submit",
+      methodMatches: this.method.toLowerCase() === "post",
+      nativeSubmitCount,
+      ownedByDocument: this.ownerDocument === document,
+      underBody: Boolean(document.body && document.body.contains(this)),
+    });
+    return Reflect.apply(nativeSubmit, this, []);
+  };
+}
+
+test("real Chromium proves configured referrer privacy and the AJAX m1/form m2 Trakt launches", {
   timeout: 120000,
 }, async (t) => {
   assert.equal(Number(process.versions.node.split(".", 1)[0]), 24);
   const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "jumpgate-trakt-browser-"));
   const connectRequests = [];
   const authorizationRequests = [];
+  const configuredRequestCaptures = [];
   const probeEvents = [];
-  let resolveConnectFinished;
-  const connectFinished = new Promise((resolve) => {
-    resolveConnectFinished = resolve;
-  });
+  let activeConfiguredCapture = null;
   let app = null;
   let authorizationServer = null;
   let browser = null;
@@ -155,7 +184,21 @@ test("real Chromium proves the expanded AJAX m1 and native-form m2 Trakt launche
   app = require("../../index");
 
   bridgeServer = https.createServer(tls, (request, response) => {
-    if (request.url === CONNECT_PATH) {
+    const target = new URL(request.url, "https://127.0.0.1");
+    if (
+      activeConfiguredCapture &&
+      (target.pathname.startsWith("/assets/") || target.pathname === CONNECT_PATH)
+    ) {
+      activeConfiguredCapture.requests.push({
+        cookieNames: cookieNames(request.headers.cookie),
+        kind: target.pathname === CONNECT_PATH ? "form" : "asset",
+        method: request.method,
+        origin: request.headers.origin || null,
+        pathname: target.pathname,
+        referer: request.headers.referer || null,
+      });
+    }
+    if (target.pathname === CONNECT_PATH) {
       const observation = {
         cookieNames: cookieNames(request.headers.cookie),
         destination: null,
@@ -178,7 +221,6 @@ test("real Chromium proves the expanded AJAX m1 and native-form m2 Trakt launche
           target.pathname === TRAKT_AUTHORIZE_PATH
             ? "authorize"
             : "other";
-        resolveConnectFinished();
       });
     }
     app(request, response);
@@ -191,48 +233,6 @@ test("real Chromium proves the expanded AJAX m1 and native-form m2 Trakt launche
   });
   const context = await browser.newContext();
   const page = await context.newPage();
-  await page.exposeBinding(PROBE_BINDING, (_source, event) => {
-    probeEvents.push(event);
-  });
-  await page.addInitScript(
-    ({ binding, buttonId, configurePath, connectPath }) => {
-      if (window.location.pathname !== configurePath) return;
-      let clickCount = 0;
-      let nativeSubmitCount = 0;
-      const record = (event) => {
-        void window[binding](event);
-      };
-      document.addEventListener("click", (event) => {
-        const button = event.target && event.target.closest
-          ? event.target.closest("#" + buttonId)
-          : null;
-        if (!button) return;
-        clickCount += 1;
-        record({ clickCount, kind: "click" });
-      }, true);
-
-      const nativeSubmit = HTMLFormElement.prototype.submit;
-      HTMLFormElement.prototype.submit = function submit() {
-        nativeSubmitCount += 1;
-        record({
-          actionMatches: new URL(this.action, document.baseURI).pathname === connectPath,
-          connected: this.isConnected,
-          kind: "native-submit",
-          methodMatches: this.method.toLowerCase() === "post",
-          nativeSubmitCount,
-          ownedByDocument: this.ownerDocument === document,
-          underBody: Boolean(document.body && document.body.contains(this)),
-        });
-        return Reflect.apply(nativeSubmit, this, []);
-      };
-    },
-    {
-      binding: PROBE_BINDING,
-      buttonId: "reconnectTraktBtn",
-      configurePath: CONFIGURE_PATH,
-      connectPath: CONNECT_PATH,
-    }
-  );
 
   await page.goto(origin + CONFIGURE_PATH, { waitUntil: "networkidle" });
   await page.evaluate(async () => {
@@ -253,90 +253,157 @@ test("real Chromium proves the expanded AJAX m1 and native-form m2 Trakt launche
   await page.locator('label[for="skipTraktAcknowledge"]').click();
   await page.locator("#skipTraktBtn").click();
   await page.waitForFunction(() => Boolean(document.getElementById("configBlob").value));
-  await page.locator("#pairBtn").click();
-  await page.waitForFunction(() => {
-    const panel = document.getElementById("profileManagement");
-    const button = document.getElementById("reconnectTraktBtn");
-    return panel && !panel.classList.contains("hidden") && button && !button.disabled;
-  });
+  const configuredCapability = await page.locator("#configBlob").inputValue();
+  assert.match(configuredCapability, /^[A-Za-z0-9_-]{40,}$/);
 
-  let resolveAuthorizationRequest;
-  const authorizationRequest = new Promise((resolve) => {
-    resolveAuthorizationRequest = resolve;
-  });
-  page.on("request", (request) => {
-    const target = new URL(request.url());
-    if (target.origin === authorizationOrigin && target.pathname === TRAKT_AUTHORIZE_PATH) {
-      resolveAuthorizationRequest(request);
-    }
-  });
-  await page.evaluate(() => {
-    const button = document.getElementById("reconnectTraktBtn");
-    button.click();
-    button.click();
-  });
-  await connectFinished;
-  assert.deepEqual(connectRequests, [
+  const configuredForms = [
     {
+      label: "query-config",
+      path: CONFIGURE_PATH + "?config=" + encodeURIComponent(configuredCapability),
+    },
+    {
+      label: "canonical-path",
+      path: "/_c/" + configuredCapability + "/configure",
+    },
+  ];
+  for (const configuredForm of configuredForms) {
+    const formContext = await browser.newContext();
+    const formPage = await formContext.newPage();
+    await formPage.exposeBinding(PROBE_BINDING, (_source, event) => {
+      probeEvents.push({ form: configuredForm.label, ...event });
+    });
+    await formPage.addInitScript(installNativeFormProbe, {
+      binding: PROBE_BINDING,
+      buttonId: "reconnectTraktBtn",
+      connectPath: CONNECT_PATH,
+    });
+
+    const capture = {
+      capability: configuredCapability,
+      form: configuredForm.label,
+      requests: [],
+    };
+    configuredRequestCaptures.push(capture);
+    activeConfiguredCapture = capture;
+    try {
+      await formPage.goto(origin + configuredForm.path, { waitUntil: "networkidle" });
+      await formPage.evaluate(async () => {
+        const response = await fetch("/pair/device/code", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ deviceName: "Configured referrer smoke" }),
+        });
+        const body = await response.json().catch(() => null);
+        if (!response.ok || !body || typeof body.userCode !== "string") {
+          throw new Error("configured pairing bootstrap failed");
+        }
+        const input = document.getElementById("pairCode");
+        input.value = body.userCode;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      await formPage.locator("#pairBtn").click();
+      await formPage.waitForFunction(() => {
+        const panel = document.getElementById("profileManagement");
+        const button = document.getElementById("reconnectTraktBtn");
+        return panel && !panel.classList.contains("hidden") && button && !button.disabled;
+      });
+      const authorizationRequest = formPage.waitForRequest((request) => {
+        const target = new URL(request.url());
+        return target.origin === authorizationOrigin && target.pathname === TRAKT_AUTHORIZE_PATH;
+      }, { timeout: 10000 });
+      await formPage.evaluate(() => {
+        const button = document.getElementById("reconnectTraktBtn");
+        button.click();
+        button.click();
+      });
+      const authorizationNavigation = await authorizationRequest;
+      assert.equal(authorizationNavigation.method(), "GET");
+      const redirectedFrom = authorizationNavigation.redirectedFrom();
+      assert.ok(redirectedFrom);
+      assert.equal(redirectedFrom.method(), "POST");
+      assert.equal(new URL(redirectedFrom.url()).pathname, CONNECT_PATH);
+      assert.equal((await redirectedFrom.response()).status(), 303);
+      assert.equal((await authorizationNavigation.response()).status(), 200);
+    } finally {
+      activeConfiguredCapture = null;
+      await formContext.close();
+    }
+  }
+
+  const requiredAssets = new Set([
+    "/assets/configure.css",
+    "/assets/configure.js",
+    "/assets/jumpgate-mark.svg",
+    "/assets/stremio-account-client.js",
+    "/assets/trakt-lockup-negative.svg",
+  ]);
+  for (const capture of configuredRequestCaptures) {
+    const assets = capture.requests.filter((request) => request.kind === "asset");
+    const forms = capture.requests.filter((request) => request.kind === "form");
+    const assetPaths = new Set(assets.map((request) => request.pathname));
+    for (const requiredAsset of requiredAssets) {
+      assert.equal(
+        assetPaths.has(requiredAsset),
+        true,
+        capture.form + " did not request " + requiredAsset
+      );
+    }
+    assert.equal(forms.length, 1, capture.form + " form capture was incomplete");
+    assert.deepEqual(forms[0], {
       cookieNames: ["jg_management_session"],
-      destination: "authorize",
+      kind: "form",
       method: "POST",
       origin,
-      protocol: "form-v2",
-      status: 303,
-    },
-  ]);
-  let authorizationTimeout;
-  let authorizationNavigation;
-  try {
-    authorizationNavigation = await Promise.race([
-      authorizationRequest,
-      new Promise((_, reject) => {
-        authorizationTimeout = setTimeout(
-          () => reject(new Error("authorization redirect was not requested")),
-          10000
-        );
-      }),
-    ]);
-  } finally {
-    clearTimeout(authorizationTimeout);
+      pathname: CONNECT_PATH,
+      referer: origin + "/",
+    });
+    for (const request of assets) {
+      assert.equal(
+        request.referer === null || request.referer === origin + "/",
+        true,
+        capture.form + " sent a path or query in an asset referrer"
+      );
+    }
+    assert.equal(JSON.stringify(capture.requests).includes(configuredCapability), false);
   }
-  assert.equal(authorizationNavigation.method(), "GET");
-  const redirectedFrom = authorizationNavigation.redirectedFrom();
-  assert.ok(redirectedFrom);
-  assert.equal(redirectedFrom.method(), "POST");
-  assert.equal(new URL(redirectedFrom.url()).pathname, CONNECT_PATH);
-  assert.equal((await redirectedFrom.response()).status(), 303);
-  assert.equal((await authorizationNavigation.response()).status(), 200);
-  assert.deepEqual(probeEvents.filter((event) => event.kind === "click"), [
-    { clickCount: 1, kind: "click" },
-  ]);
-  assert.deepEqual(probeEvents.filter((event) => event.kind === "native-submit"), [
-    {
+
+  assert.deepEqual(connectRequests, configuredForms.map(() => ({
+    cookieNames: ["jg_management_session"],
+    destination: "authorize",
+    method: "POST",
+    origin,
+    protocol: "form-v2",
+    status: 303,
+  })));
+  assert.deepEqual(probeEvents.filter((event) => event.kind === "click"), configuredForms.map(
+    (configuredForm) => ({ clickCount: 1, form: configuredForm.label, kind: "click" })
+  ));
+  assert.deepEqual(
+    probeEvents.filter((event) => event.kind === "native-submit"),
+    configuredForms.map((configuredForm) => ({
       actionMatches: true,
       connected: true,
+      form: configuredForm.label,
       kind: "native-submit",
       methodMatches: true,
       nativeSubmitCount: 1,
       ownedByDocument: true,
       underBody: true,
-    },
-  ]);
-  assert.deepEqual(authorizationRequests, [
-    {
-      clientIdMatches: true,
-      cookieNames: [],
-      method: "GET",
-      origin: null,
-      pathname: TRAKT_AUTHORIZE_PATH,
-      queryKeys: ["client_id", "redirect_uri", "response_type", "state"],
-      redirectUriMatches: true,
-      referer: null,
-      responseTypeMatches: true,
-      stateMatches: true,
-      stateVersion: "m2",
-    },
-  ]);
+    }))
+  );
+  assert.deepEqual(authorizationRequests, configuredForms.map(() => ({
+    clientIdMatches: true,
+    cookieNames: [],
+    method: "GET",
+    origin: null,
+    pathname: TRAKT_AUTHORIZE_PATH,
+    queryKeys: ["client_id", "redirect_uri", "response_type", "state"],
+    redirectUriMatches: true,
+    referer: null,
+    responseTypeMatches: true,
+    stateMatches: true,
+    stateVersion: "m2",
+  })));
 
   const legacyContext = await browser.newContext();
   const legacyPage = await legacyContext.newPage();
@@ -410,7 +477,8 @@ test("real Chromium proves the expanded AJAX m1 and native-form m2 Trakt launche
   const legacyNavigation = await legacyAuthorization;
   assert.equal(legacyNavigation.method(), "GET");
   assert.equal((await legacyNavigation.response()).status(), 200);
-  assert.deepEqual(connectRequests[1], {
+  assert.equal(connectRequests.length, 3);
+  assert.deepEqual(connectRequests.at(-1), {
     cookieNames: ["jg_management_session"],
     destination: "other",
     method: "POST",
@@ -418,7 +486,8 @@ test("real Chromium proves the expanded AJAX m1 and native-form m2 Trakt launche
     protocol: "ajax-v1",
     status: 200,
   });
-  assert.deepEqual(authorizationRequests[1], {
+  assert.equal(authorizationRequests.length, 3);
+  assert.deepEqual(authorizationRequests.at(-1), {
     clientIdMatches: true,
     cookieNames: [],
     method: "GET",
