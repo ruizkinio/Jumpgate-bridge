@@ -1935,6 +1935,44 @@ test("owned production sources contain no Stremio mutation or rollback path", ()
   assert.match(configureSource, /Provider import failed\. Your Stremio account was not changed\./);
 });
 
+test("install stage preserves Android external-player setup guidance", () => {
+  const html = fs.readFileSync(publicPath("configure.html"), "utf8");
+  const guidance = html.match(
+    /<div id="installPlaybackGuidance"[^>]*>[\s\S]*?<\/div>/i
+  );
+
+  assert.ok(guidance, "playback guidance container must remain present");
+  const instructionList = guidance[0].match(
+    /<ol class="player-setup-list">([\s\S]*?)<\/ol>/i
+  );
+  assert.ok(instructionList, "ordered playback instructions must remain present");
+  const instructions = [...instructionList[1].matchAll(/<li>([\s\S]*?)<\/li>/gi)].map((match) =>
+    match[1].replace(/<[^>]+>/g, " ").replace(/&gt;/g, ">").replace(/\s+/g, " ").trim()
+  );
+
+  assert.equal(instructions.length, 4);
+  assert.match(instructions[0], /install the generated Jumpgate addon in Stremio/i);
+  assert.match(instructions[0], /keep its private install link to yourself/i);
+  assert.match(instructions[1], /Settings > Playback > Default player to External player/i);
+  assert.match(instructions[2], /In Stremio, start a Jumpgate source/i);
+  assert.match(instructions[3], /Android opens the player chooser, select Jumpgate/i);
+  assert.match(guidance[0], /Use <strong>Just once<\/strong> while testing/i);
+  assert.match(guidance[0], /<strong>Always<\/strong> can affect matching launches from other apps/i);
+  assert.match(guidance[0], /different stream scheme may ask again/i);
+  assert.match(
+    guidance[0],
+    /<details class="player-setup-help">\s*<summary>Android skipped the chooser\?<\/summary>[\s\S]*?<\/details>/i
+  );
+  assert.match(guidance[0], /clear only the other player's <strong>Open by default<\/strong> or <strong>Set as default<\/strong>/i);
+  assert.match(guidance[0], /Toggling Stremio's player setting does not clear Android's remembered external app/i);
+  assert.match(guidance[0], /Do not clear Stremio app data or sign out/i);
+  assert.match(guidance[0], /class="profile-note player-setup-note"[^>]*role="note"/);
+  assert.match(html, /<section class="stage-block install-stage"[^>]*aria-describedby="installPrivacy"/);
+  assert.match(html, /<input id="install"[^>]*aria-describedby="installPrivacy"/);
+  assert.match(html, /<input id="installManifest"[^>]*aria-describedby="installPrivacy"/);
+  assert.equal((html.match(/aria-describedby="installPrivacy"/g) || []).length, 3);
+});
+
 test("safe-flow UI is pair-gated, accessible, read-only, and profile-specific", () => {
   const html = fs.readFileSync(publicPath("configure.html"), "utf8");
   const css = fs.readFileSync(publicPath("configure.css"), "utf8");
