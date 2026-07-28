@@ -23,7 +23,7 @@ const { SubtitleDiscoveryService } = require("./lib/subtitle-discovery-service")
 const { SubtitleSource } = require("./lib/subtitle-source");
 const { TraktScrobbleService } = require("./lib/trakt-scrobble-service");
 const {
-  buildTraktAuthorizeUrl,
+  buildTraktConsentUrl,
   resolveTraktAuthorizeUrl,
 } = require("./lib/trakt-authorize-url");
 const {
@@ -3617,6 +3617,18 @@ async function requireManagementTraktLaunchIpRateLimit(req, res, next) {
   );
 }
 
+async function requireManagementTraktContinuationIpRateLimit(req, res, next) {
+  return applyManagementTraktLaunchRateLimit(
+    req,
+    res,
+    next,
+    "management-trakt-continuation-ip",
+    "ip:" + rateLimitKey(req),
+    managementTraktIpLaunchLimit,
+    MANAGEMENT_TRAKT_IP_LAUNCH_WINDOW_MS
+  );
+}
+
 async function requireManagementTraktLaunchRateLimit(req, res, next) {
   return applyManagementTraktLaunchRateLimit(
     req,
@@ -3698,7 +3710,7 @@ app.post(
       res.setHeader("Pragma", "no-cache");
       res.setHeader("Referrer-Policy", "no-referrer");
       res.status(303);
-      res.setHeader("Location", buildTraktAuthorizeUrl(TRAKT_AUTHORIZE_URL, params));
+      res.setHeader("Location", buildTraktConsentUrl(TRAKT_AUTHORIZE_URL, params));
       return res.end();
     } catch (error) {
       if (issued && issued.stateToken) {
@@ -3716,31 +3728,38 @@ app.post(
   })
 );
 
-app.get("/api/profile/trakt/connect/continue", (req, res) => {
-  const stateToken = getCookie(req, MANAGEMENT_OAUTH_STATE_COOKIE);
-  setCookie(res, MANAGEMENT_OAUTH_STATE_COOKIE, "", {
-    path: "/api/profile/trakt/connect/continue",
-    maxAgeSec: 0,
-    httpOnly: true,
-    secure: secureCookieForRequest(req),
-    sameSite: "Strict",
-  });
-  res.setHeader("Cache-Control", "no-store");
-  res.setHeader("Pragma", "no-cache");
-  res.setHeader("Referrer-Policy", "no-referrer");
-  if (!MANAGEMENT_OAUTH_STATE_TOKEN_PATTERN.test(stateToken)) {
-    return rejectManagementTraktLaunch(res, "Trakt connection state expired. Pair Jumpgate and start again.");
+app.get(
+  "/api/profile/trakt/connect/continue",
+  asyncHandler(requireManagementTraktContinuationIpRateLimit),
+  (req, res) => {
+    const stateToken = getCookie(req, MANAGEMENT_OAUTH_STATE_COOKIE);
+    setCookie(res, MANAGEMENT_OAUTH_STATE_COOKIE, "", {
+      path: "/api/profile/trakt/connect/continue",
+      maxAgeSec: 0,
+      httpOnly: true,
+      secure: secureCookieForRequest(req),
+      sameSite: "Strict",
+    });
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Referrer-Policy", "no-referrer");
+    if (!MANAGEMENT_OAUTH_STATE_TOKEN_PATTERN.test(stateToken)) {
+      return rejectManagementTraktLaunch(
+        res,
+        "Trakt connection state expired. Pair Jumpgate and start again."
+      );
+    }
+    const params = new URLSearchParams({
+      response_type: "code",
+      client_id: TRAKT_CLIENT_ID,
+      redirect_uri: getTraktRedirectUri(req),
+      state: "m1." + stateToken,
+    });
+    res.status(303);
+    res.setHeader("Location", buildTraktConsentUrl(TRAKT_AUTHORIZE_URL, params));
+    return res.end();
   }
-  const params = new URLSearchParams({
-    response_type: "code",
-    client_id: TRAKT_CLIENT_ID,
-    redirect_uri: getTraktRedirectUri(req),
-    state: "m1." + stateToken,
-  });
-  res.status(303);
-  res.setHeader("Location", buildTraktAuthorizeUrl(TRAKT_AUTHORIZE_URL, params));
-  return res.end();
-});
+);
 
 app.delete(
   "/api/profile",

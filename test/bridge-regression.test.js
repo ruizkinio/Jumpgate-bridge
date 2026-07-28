@@ -1985,6 +1985,43 @@ test("management Trakt IP launch limiting isolates source addresses", async () =
   }
 });
 
+test("management Trakt continuation limiting isolates source addresses", async () => {
+  app.setManagementTraktIpLaunchLimitForTest(2);
+  const stateCookie = "jg_management_oauth_state=" + "a".repeat(43);
+  try {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const allowed = await requestFromLocalAddress(
+        "/api/profile/trakt/connect/continue",
+        "127.0.0.4",
+        { headers: { cookie: stateCookie } }
+      );
+      assert.equal(allowed.status, 303);
+      assert.match(allowed.headers.location, /^https:\/\/trakt\.tv\//);
+      assert.equal(allowed.headers["ratelimit-limit"], "2");
+    }
+
+    const limited = await requestFromLocalAddress(
+      "/api/profile/trakt/connect/continue",
+      "127.0.0.4",
+      { headers: { cookie: stateCookie } }
+    );
+    assert.equal(limited.status, 303);
+    assert.match(limited.headers.location, /^\/configure\?error=/);
+    assert.equal(limited.headers["ratelimit-limit"], "2");
+    assert.equal(limited.headers["set-cookie"], undefined);
+
+    const isolated = await requestFromLocalAddress(
+      "/api/profile/trakt/connect/continue",
+      "127.0.0.5",
+      { headers: { cookie: stateCookie } }
+    );
+    assert.equal(isolated.status, 303);
+    assert.match(isolated.headers.location, /^https:\/\/trakt\.tv\//);
+  } finally {
+    app.setManagementTraktIpLaunchLimitForTest(null);
+  }
+});
+
 test("slotted OAuth cookies support reversed callbacks and exact profile isolation", async () => {
   const first = await pairDevice(await generateConfig("OAuth Slotted Profile A"));
   const second = await pairDevice(await generateConfig("OAuth Slotted Profile B"));

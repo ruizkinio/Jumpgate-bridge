@@ -2017,7 +2017,10 @@ test("safe-flow UI is pair-gated, accessible, read-only, and profile-specific", 
   assert.match(configureSource, /await api\.connectTrakt\(\)/);
   assert.match(configureSource, /browser\.location\.assign\(target\)/);
   assert.doesNotMatch(configureSource, /fetch\("\/auth\/trakt\/start"/);
-  assert.match(indexSource, /app\.get\("\/api\/profile\/trakt\/connect\/continue"/);
+  assert.match(
+    indexSource,
+    /app\.get\(\s*"\/api\/profile\/trakt\/connect\/continue",\s*asyncHandler\(requireManagementTraktContinuationIpRateLimit\)/
+  );
   assert.doesNotMatch(indexSource, /app\.(?:get|post)\("\/auth\/trakt(?:\/start)?"/);
   assert.doesNotMatch(indexSource, /\/v1\/trakt\/token|\/auth\/token/);
 });
