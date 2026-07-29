@@ -29,6 +29,7 @@ const {
   isAllowedPackagePath,
   materializeSelectedIndex,
   parseGitIndexEntries,
+  readStableRegularFile,
   readIndexedFileBytes,
   runPolicy,
   scanCredentialBytes,
@@ -62,6 +63,24 @@ const REDIS_V5_FIXTURE_FILES = Object.freeze([
       .map((entry) => path.posix.join(REDIS_SCRIPT_DIRECTORY, entry.name)),
   ]),
 ]);
+
+test("stable regular-file reads reject directories and symbolic links", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "jumpgate-regular-read-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const regular = path.join(root, "regular.txt");
+  fs.writeFileSync(regular, "locked bytes", "utf8");
+  assert.equal(readStableRegularFile(regular, "not regular").toString("utf8"), "locked bytes");
+  assert.throws(() => readStableRegularFile(root, "not regular"), /not regular/);
+
+  const link = path.join(root, "link.txt");
+  try {
+    fs.symlinkSync(regular, link, "file");
+  } catch (error) {
+    if (error && (error.code === "EPERM" || error.code === "EACCES")) return;
+    throw error;
+  }
+  assert.throws(() => readStableRegularFile(link, "not regular"));
+});
 
 function trackedLicense(overrides = {}) {
   return { mode: "100644", path: "LICENSE", stage: 0, ...overrides };
