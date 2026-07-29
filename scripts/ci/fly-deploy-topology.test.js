@@ -164,6 +164,81 @@ const FLYCTL_VERIFY_RUN =
   '\\"BuildDate\\":\\"${FLYCTL_BUILD_DATE}\\",\\"OS\\":\\"linux\\",' +
   '\\"Architecture\\":\\"amd64\\",\\"Environment\\":\\"production\\"}"\n' +
   'echo "FLYCTL_BIN=$tool_dir/flyctl-verified" >> "$GITHUB_ENV"\n';
+const FLY_API_ENV = Object.freeze({
+  FLY_API_TOKEN: "${{ secrets.FLY_API_TOKEN }}",
+});
+const FLY_API_NO_COLOR_ENV = Object.freeze({
+  FLY_API_TOKEN: "${{ secrets.FLY_API_TOKEN }}",
+  NO_COLOR: "1",
+});
+const WRITER_PLAN_RUN =
+  'node scripts/ci/fly-managed-rollout.js plan --app=jumpgate-bridge --config=fly.toml ' +
+  '--image="$IMMUTABLE_IMAGE_REF" >> "$GITHUB_OUTPUT"';
+const TRANSITION_DEPLOY_RUN =
+  '"$FLYCTL_BIN" deploy \\\n' +
+  '  --app jumpgate-bridge \\\n' +
+  '  --config fly.toml \\\n' +
+  '  --image "$IMMUTABLE_IMAGE_REF" \\\n' +
+  '  --env JUMPGATE_REDIS_PLAYBACK_CLAIM_ROLLOUT_MODE=transition \\\n' +
+  '  --strategy rolling \\\n' +
+  '  --wait-timeout 10m \\\n' +
+  '  --yes\n';
+const FINAL_DEPLOY_RUN = TRANSITION_DEPLOY_RUN.replace(
+  "JUMPGATE_REDIS_PLAYBACK_CLAIM_ROLLOUT_MODE=transition",
+  "JUMPGATE_REDIS_PLAYBACK_CLAIM_ROLLOUT_MODE=v6"
+);
+const TRANSITION_CONVERGE_RUN =
+  'node scripts/ci/fly-managed-rollout.js converge --app=jumpgate-bridge --config=fly.toml ' +
+  '--image="$IMMUTABLE_IMAGE_REF" --phase=transition';
+const FINAL_CONVERGE_RUN = TRANSITION_CONVERGE_RUN.replace(
+  "--phase=transition",
+  "--phase=v6"
+);
+const TRANSITION_ATTEST_RUN =
+  'node scripts/ci/fly-managed-rollout.js attest --app=jumpgate-bridge --config=fly.toml ' +
+  '--image="$IMMUTABLE_IMAGE_REF" --base-url=https://jumpgate-bridge.fly.dev ' +
+  '--phase=transition';
+const FINAL_ATTEST_RUN = TRANSITION_ATTEST_RUN.replace("--phase=transition", "--phase=v6");
+const PUBLIC_SMOKE_RUN =
+  'expected_version="$(node -p "require(\'./package.json\').version")"\n' +
+  'node scripts/ci/http-smoke.js \\\n' +
+  '  --base-url=https://jumpgate-bridge.fly.dev \\\n' +
+  '  --expected-version="$expected_version" \\\n' +
+  '  --expected-build-sha="$GITHUB_SHA" \\\n' +
+  '  --expected-readiness=ready \\\n' +
+  '  --deadline-ms=60000 \\\n' +
+  '  --delay-ms=2000\n' +
+  '{\n' +
+  '  echo "### Fly production"\n' +
+  '  echo "- Exact build SHA: `$GITHUB_SHA`"\n'.replaceAll("`", "\\`") +
+  '  echo "- Immutable registry digest: `$IMAGE_DIGEST`"\n'.replaceAll("`", "\\`") +
+  '  echo "- The candidate protocol was probed before rollout; any required transition and the final v6 fleet used the same digest."\n' +
+  '  echo "- Final health, readiness, version, manifest, configure, and provenance passed."\n' +
+  '} >> "$GITHUB_STEP_SUMMARY"\n';
+const POST_SMOKE_ATTEST_RUN =
+  'set -euo pipefail\n' +
+  'attestation_dir="$RUNNER_TEMP/jumpgate-deployment-attestation-$GITHUB_RUN_ID"\n' +
+  'mkdir "$attestation_dir"\n' +
+  'node scripts/ci/fly-managed-rollout.js attest \\\n' +
+  '  --app=jumpgate-bridge \\\n' +
+  '  --config=fly.toml \\\n' +
+  '  --image="$IMMUTABLE_IMAGE_REF" \\\n' +
+  '  --base-url=https://jumpgate-bridge.fly.dev \\\n' +
+  '  --phase=v6 \\\n' +
+  '  --receipt="$attestation_dir/managed-fleet-attestation.json"\n';
+const DERIVE_ATTESTATION_RUN =
+  'set -euo pipefail\n' +
+  'attestation_dir="$RUNNER_TEMP/jumpgate-deployment-attestation-$GITHUB_RUN_ID"\n' +
+  'status_file="$attestation_dir/fly-machine-list.json"\n' +
+  '"$FLYCTL_BIN" machine list --app jumpgate-bridge --json > "$status_file"\n' +
+  'node scripts/ci/deployment-attestation.js \\\n' +
+  '  --status-file="$status_file" \\\n' +
+  '  --receipt-file="$attestation_dir/managed-fleet-attestation.json" \\\n' +
+  '  --config=fly.toml \\\n' +
+  '  --output="$attestation_dir/deployment-attestation.json" \\\n' +
+  '  --bridge-commit="$GITHUB_SHA" \\\n' +
+  '  --image-digest="$IMAGE_DIGEST" \\\n' +
+  '  --workflow-run-id="$GITHUB_RUN_ID"\n';
 const CLEANUP_CONTAINERS = Object.freeze([
   "jumpgate-http-smoke-ci",
   "jumpgate-http-smoke-ci-public",
@@ -1347,6 +1422,78 @@ function expectedFingerprintParitySteps() {
   ];
 }
 
+function expectedManagedRolloutSteps() {
+  const transitionIf = "steps.writer-protocol.outputs.transition_required == 'true'";
+  return [
+    expectedJobStep("deploy", ["name", "id", "env", "run"], {
+      name: "Probe the exact candidate image and plan the writer rollout",
+      id: "writer-protocol",
+      env: FLY_API_NO_COLOR_ENV,
+      run: WRITER_PLAN_RUN,
+    }),
+    expectedJobStep("deploy", ["name", "if", "env", "run"], {
+      name: "Deploy transition writers with the resolved immutable digest",
+      if: transitionIf,
+      env: FLY_API_ENV,
+      run: TRANSITION_DEPLOY_RUN,
+    }),
+    expectedJobStep("deploy", ["name", "if", "env", "run"], {
+      name: "Converge the exact transition fleet before attestation",
+      if: transitionIf,
+      env: FLY_API_ENV,
+      run: TRANSITION_CONVERGE_RUN,
+    }),
+    expectedJobStep("deploy", ["name", "if", "env", "run"], {
+      name: "Attest the exact transition fleet across repeated intervals",
+      if: transitionIf,
+      env: FLY_API_ENV,
+      run: TRANSITION_ATTEST_RUN,
+    }),
+    expectedJobStep("deploy", ["name", "env", "run"], {
+      name: "Advance the protocol and deploy final v6 writers with the same digest",
+      env: FLY_API_ENV,
+      run: FINAL_DEPLOY_RUN,
+    }),
+    expectedJobStep("deploy", ["name", "env", "run"], {
+      name: "Converge the exact final v6 fleet before attestation",
+      env: FLY_API_ENV,
+      run: FINAL_CONVERGE_RUN,
+    }),
+    expectedJobStep("deploy", ["name", "env", "run"], {
+      name: "Attest the exact final v6 fleet before public smoke",
+      env: FLY_API_ENV,
+      run: FINAL_ATTEST_RUN,
+    }),
+    expectedJobStep("deploy", ["name", "run"], {
+      name: "Validate exact public production provenance without logging bodies",
+      run: PUBLIC_SMOKE_RUN,
+    }),
+    expectedJobStep("deploy", ["name", "env", "run"], {
+      name: "Re-attest final v6 protocol and fleet after public smoke",
+      env: FLY_API_ENV,
+      run: POST_SMOKE_ATTEST_RUN,
+    }),
+    expectedJobStep("deploy", ["name", "env", "run"], {
+      name: "Derive attestation from the final exact Fly state",
+      env: FLY_API_NO_COLOR_ENV,
+      run: DERIVE_ATTESTATION_RUN,
+    }),
+    expectedJobStep("deploy", ["name", "uses", "with"], {
+      name: "Preserve exact deployment attestation",
+      uses: "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+      with: {
+        name:
+          "jumpgate-deployment-attestation-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}",
+        path:
+          "${{ runner.temp }}/jumpgate-deployment-attestation-${{ github.run_id }}/deployment-attestation.json",
+        "if-no-files-found": "error",
+        "retention-days": "35",
+        "compression-level": "0",
+      },
+    }),
+  ];
+}
+
 function validateWorkflow(source) {
   const model = parseWorkflow(source);
   assert.deepEqual(model.globalEnv, WORKFLOW_ENV, "global inherited environment must be exact");
@@ -1497,6 +1644,15 @@ function validateWorkflow(source) {
       run: FLYCTL_VERIFY_RUN,
     }),
   ]);
+  const rolloutStart = deployJob.steps.findIndex(
+    (step) => step.name === "Probe the exact candidate image and plan the writer rollout"
+  );
+  assert.equal(rolloutStart >= 0, true, "managed rollout tail is required");
+  assert.deepEqual(
+    deployJob.steps.slice(rolloutStart),
+    expectedManagedRolloutSteps(),
+    "the managed deployment tail must be exact and contiguous"
+  );
   const provenanceJob = model.jobs["deployment-provenance"];
   assert.ok(provenanceJob, "deployment-provenance job is required");
   assert.deepEqual(provenanceJob.keys, [
@@ -3902,6 +4058,38 @@ test("workflow structure mutations cannot alter the sealed job", async (t) => {
     );
   const jobMutation = (property) =>
     replaceOnce(workflow, "  container-smoke:\n    name:", `  container-smoke:\n${property}    name:`);
+  const rolloutPropertyMutation = (name, property) => {
+    const marker = `      - name: ${name}\n`;
+    return replaceOnce(workflow, marker, marker + property);
+  };
+  const rolloutStepBlock = (name, nextName) => {
+    const start = workflow.indexOf(`      - name: ${name}\n`);
+    const end = workflow.indexOf(`      - name: ${nextName}\n`, start + 1);
+    assert.equal(start >= 0 && end > start, true, `rollout block missing: ${name}`);
+    return workflow.slice(start, end);
+  };
+  const finalDeployBlock = rolloutStepBlock(
+    "Advance the protocol and deploy final v6 writers with the same digest",
+    "Converge the exact final v6 fleet before attestation"
+  );
+  const publicSmokeBlock = rolloutStepBlock(
+    "Validate exact public production provenance without logging bodies",
+    "Re-attest final v6 protocol and fleet after public smoke"
+  );
+  const postSmokeBlock = rolloutStepBlock(
+    "Re-attest final v6 protocol and fleet after public smoke",
+    "Derive attestation from the final exact Fly state"
+  );
+  const attestationUploadStart = workflow.indexOf(
+    "      - name: Preserve exact deployment attestation\n"
+  );
+  const attestationUploadEnd = workflow.indexOf("  deployment-provenance:\n", attestationUploadStart);
+  assert.equal(
+    attestationUploadStart >= 0 && attestationUploadEnd > attestationUploadStart,
+    true,
+    "deployment attestation upload block is missing"
+  );
+  const attestationUploadBlock = workflow.slice(attestationUploadStart, attestationUploadEnd);
   const cases = [
     ["duplicate target step", replaceOnce(workflow, block, block + block)],
     [
@@ -3964,6 +4152,78 @@ test("workflow structure mutations cannot alter the sealed job", async (t) => {
         workflow,
         `        run: ${HELPER_INVOCATION}\n`,
         `        run: ${HELPER_INVOCATION}\n        run: true\n`
+      ),
+    ],
+    ["duplicate final deploy", replaceOnce(workflow, finalDeployBlock, finalDeployBlock + finalDeployBlock)],
+    [
+      "final deploy conditional bypass",
+      rolloutPropertyMutation(
+        "Advance the protocol and deploy final v6 writers with the same digest",
+        "        if: always()\n"
+      ),
+    ],
+    [
+      "final deploy continue-on-error",
+      rolloutPropertyMutation(
+        "Advance the protocol and deploy final v6 writers with the same digest",
+        "        continue-on-error: true\n"
+      ),
+    ],
+    [
+      "final deploy environment injection",
+      replaceOnce(
+        workflow,
+        finalDeployBlock,
+        finalDeployBlock.replace(
+          "          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}\n",
+          "          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}\n          NODE_OPTIONS: --require=/tmp/evil.js\n"
+        )
+      ),
+    ],
+    [
+      "final deploy command drift",
+      replaceOnce(
+        workflow,
+        finalDeployBlock,
+        finalDeployBlock.replace(
+          "JUMPGATE_REDIS_PLAYBACK_CLAIM_ROLLOUT_MODE=v6",
+          "JUMPGATE_REDIS_PLAYBACK_CLAIM_ROLLOUT_MODE=transition"
+        )
+      ),
+    ],
+    ["missing post-smoke protocol attestation", replaceOnce(workflow, postSmokeBlock, "")],
+    [
+      "post-smoke attestation reordered before smoke",
+      replaceOnce(workflow, publicSmokeBlock + postSmokeBlock, postSmokeBlock + publicSmokeBlock),
+    ],
+    [
+      "post-smoke receipt path drift",
+      replaceOnce(
+        workflow,
+        postSmokeBlock,
+        postSmokeBlock.replace(
+          "managed-fleet-attestation.json",
+          "unreviewed-fleet-attestation.json"
+        )
+      ),
+    ],
+    [
+      "attestation upload action drift",
+      replaceOnce(
+        workflow,
+        attestationUploadBlock,
+        attestationUploadBlock.replace(
+          "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2",
+          "actions/upload-artifact@main"
+        )
+      ),
+    ],
+    [
+      "attestation upload ignores missing file",
+      replaceOnce(
+        workflow,
+        "          if-no-files-found: error\n          retention-days: 35\n          compression-level: 0\n\n  deployment-provenance:",
+        "          if-no-files-found: ignore\n          retention-days: 35\n          compression-level: 0\n\n  deployment-provenance:"
       ),
     ],
     ...[

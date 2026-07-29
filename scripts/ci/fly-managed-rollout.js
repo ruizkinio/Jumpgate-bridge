@@ -11,6 +11,7 @@ const { parse } = require("smol-toml");
 const PACKAGE_VERSION = require("../../package.json").version;
 
 const execFileAsync = promisify(execFile);
+const FLYCTL_VERSION = "0.4.69-jumpgate-digest4";
 const IMAGE_PATTERN = /^registry\.fly\.io\/([a-z0-9-]+):git-([a-f0-9]{40})@(sha256:[a-f0-9]{64})$/;
 const MACHINE_ID_PATTERN = /^[a-f0-9]{14}$/;
 const RELEASE_ID_PATTERN = /^rel_[a-z0-9]{10,64}$/;
@@ -35,6 +36,24 @@ const CANDIDATE_PROTOCOL_STATUS_COMMAND =
   'printf "%s\\n" "$status" | sed "s/^/' + PROTOCOL_STATUS_MARKER + '/"' +
   "'";
 const ROLLOUT_PHASES = new Set(["transition", "v6"]);
+const EXPECTED_ENV = Object.freeze({
+  HOST: "0.0.0.0",
+  JUMPGATE_DURABLE_DRIVER: "postgres",
+  JUMPGATE_POSTGRES_MIGRATION_CEILING: "0011_history_http_receipts",
+  JUMPGATE_PROVIDER_MUTATION_MODE: "fenced",
+  JUMPGATE_REDIS_PLAYBACK_CLAIM_ROLLOUT_MODE: "v6",
+  JUMPGATE_REDIS_PLAYBACK_WRITE_VERSION: "4",
+  JUMPGATE_SUBTITLE_PERMANENT_ERASURE_MODE: "tigris-version-purge-v1",
+  JUMPGATE_SUBTITLE_S3_BUCKET: "jumpgate-bridge-subtitles-live",
+  JUMPGATE_SUBTITLE_S3_ENDPOINT: "https://fly.storage.tigris.dev",
+  JUMPGATE_SUBTITLE_S3_FORCE_PATH_STYLE: "0",
+  JUMPGATE_SUBTITLE_S3_PRIVACY_MODE: "tigris-policy-status",
+  JUMPGATE_SUBTITLE_S3_REGION: "auto",
+  JUMPGATE_TRUST_PROXY: "1",
+  JUMPGATE_TTL_DRIVER: "redis",
+  NODE_ENV: "production",
+  PUBLIC_BASE_URL: "https://jumpgate-bridge.fly.dev",
+});
 const REQUIRED_ENV = Object.freeze({
   JUMPGATE_DURABLE_DRIVER: "postgres",
   JUMPGATE_POSTGRES_MIGRATION_CEILING: "0011_history_http_receipts",
@@ -73,6 +92,14 @@ function isRecord(value) {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
+function assertExactKeys(value, expectedKeys, name) {
+  requireCondition(isRecord(value), name + " is invalid");
+  requireCondition(
+    JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...expectedKeys].sort()),
+    name + " shape is invalid"
+  );
+}
+
 function exactString(value, name) {
   requireCondition(typeof value === "string" && value.length > 0, name + " is invalid");
   return value;
@@ -94,8 +121,8 @@ function exactMachineId(value) {
   return value;
 }
 
-function readToml(filename) {
-  const bytes = fs.readFileSync(filename);
+function parseTomlBytes(bytes) {
+  requireCondition(Buffer.isBuffer(bytes), "fly.toml bytes are invalid");
   requireCondition(bytes.length > 0 && bytes.length <= 1024 * 1024, "fly.toml size is invalid");
   requireCondition(!bytes.includes(0), "fly.toml contains NUL bytes");
   try {
@@ -120,29 +147,47 @@ function normalizeDesiredCheck(check, internalPort) {
   });
 }
 
-function loadDesiredState(filename, expectedApp) {
-  const config = readToml(filename);
+function loadDesiredStateFromBytes(bytes, expectedApp) {
+  const config = parseTomlBytes(bytes);
+  assertExactKeys(
+    config,
+    ["app", "build", "deploy", "env", "http_service", "primary_region", "vm"],
+    "Fly configuration"
+  );
+  assertExactKeys(config.build, [], "Fly build configuration");
   const app = exactString(config.app, "Fly app");
   requireCondition(app === expectedApp, "Fly app does not match the managed deployment");
   const primaryRegion = exactString(config.primary_region, "Fly primary region");
   requireCondition(/^[a-z0-9]{3}$/.test(primaryRegion), "Fly primary region is invalid");
-  requireCondition(isRecord(config.env), "Fly environment is missing");
+  assertExactKeys(config.env, Object.keys(EXPECTED_ENV), "Fly environment");
   const env = {};
   for (const [name, value] of Object.entries(config.env)) {
     requireCondition(/^[A-Z][A-Z0-9_]*$/.test(name), "Fly environment name is invalid");
     env[name] = String(value);
   }
-  for (const [name, value] of Object.entries(REQUIRED_ENV)) {
-    requireCondition(env[name] === value, "Fly environment is not at the checked-in protocol ceiling");
+  for (const [name, value] of Object.entries(EXPECTED_ENV)) {
+    requireCondition(env[name] === value, "Fly environment differs from checked-in desired state");
   }
-  requireCondition(isRecord(config.deploy), "Fly deploy configuration is missing");
+  assertExactKeys(config.deploy, ["release_command"], "Fly deploy configuration");
   requireCondition(
     config.deploy.release_command === RELEASE_COMMAND,
     "Fly release command is not the guarded storage protocol transition"
   );
 
   const service = config.http_service;
-  requireCondition(isRecord(service), "Fly http_service is missing");
+  assertExactKeys(
+    service,
+    [
+      "auto_start_machines",
+      "auto_stop_machines",
+      "checks",
+      "force_https",
+      "internal_port",
+      "min_machines_running",
+      "processes",
+    ],
+    "Fly http_service"
+  );
   const internalPort = exactInteger(service.internal_port, "Fly internal port", 1, 65535);
   const minMachinesRunning = exactInteger(
     service.min_machines_running,
@@ -164,10 +209,15 @@ function loadDesiredState(filename, expectedApp) {
     Array.isArray(service.checks) && service.checks.length === 1,
     "Fly requires one readiness service check"
   );
+  assertExactKeys(
+    service.checks[0],
+    ["grace_period", "interval", "method", "path", "timeout"],
+    "Fly service check"
+  );
   const check = normalizeDesiredCheck(service.checks[0], internalPort);
   requireCondition(Array.isArray(config.vm) && config.vm.length === 1, "Fly VM shape is invalid");
   const vm = config.vm[0];
-  requireCondition(isRecord(vm), "Fly VM configuration is invalid");
+  assertExactKeys(vm, ["cpu_kind", "cpus", "memory", "memory_mb"], "Fly VM configuration");
   requireCondition(vm.memory === "1gb", "Fly VM memory declaration is invalid");
   const guest = Object.freeze({
     cpuKind: exactString(vm.cpu_kind, "Fly VM CPU kind"),
@@ -193,6 +243,10 @@ function loadDesiredState(filename, expectedApp) {
     releaseCommand: RELEASE_COMMAND,
     permanentErasureMode: env.JUMPGATE_SUBTITLE_PERMANENT_ERASURE_MODE,
   });
+}
+
+function loadDesiredState(filename, expectedApp) {
+  return loadDesiredStateFromBytes(fs.readFileSync(filename), expectedApp);
 }
 
 function desiredStateForPhase(desired, phase) {
@@ -239,15 +293,49 @@ function parseImage(image, app) {
 function machineProcessGroup(machine) {
   const metadata = machine.config?.metadata;
   if (!isRecord(metadata)) return null;
-  const hasFlyProcessGroup = Object.prototype.hasOwnProperty.call(metadata, "fly_process_group");
-  const hasProcessGroup = Object.prototype.hasOwnProperty.call(metadata, "process_group");
-  if (hasFlyProcessGroup && hasProcessGroup) {
-    if (metadata.fly_process_group !== metadata.process_group) return null;
-    return metadata.fly_process_group;
-  }
-  if (hasFlyProcessGroup) return metadata.fly_process_group;
-  if (hasProcessGroup) return metadata.process_group;
-  return null;
+  return metadata.fly_process_group;
+}
+
+function assertMachineConfigShape(machine) {
+  const config = machine.config;
+  assertExactKeys(
+    config,
+    ["env", "guest", "image", "init", "metadata", "restart", "services"],
+    "Machine configuration"
+  );
+  assertExactKeys(config.init, [], "Machine init configuration");
+  assertExactKeys(config.restart, ["max_retries", "policy"], "Machine restart configuration");
+  requireCondition(config.restart.policy === "on-failure", "Machine restart policy is invalid");
+  requireCondition(config.restart.max_retries === 10, "Machine restart retries are invalid");
+  assertExactKeys(config.guest, ["cpu_kind", "cpus", "memory_mb"], "Machine guest configuration");
+  assertExactKeys(
+    config.metadata,
+    [
+      "fly_builder_id",
+      "fly_flyctl_version",
+      "fly_platform_version",
+      "fly_process_group",
+      "fly_release_id",
+      "fly_release_version",
+    ],
+    "Machine metadata"
+  );
+  requireCondition(
+    typeof config.metadata.fly_builder_id === "string" &&
+      /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(config.metadata.fly_builder_id),
+    "Machine builder id is invalid"
+  );
+  requireCondition(
+    config.metadata.fly_flyctl_version === FLYCTL_VERSION,
+    "Machine Fly CLI version is invalid"
+  );
+  requireCondition(config.metadata.fly_platform_version === "v2", "Machine platform is invalid");
+  requireCondition(config.metadata.fly_process_group === "app", "Machine process group is invalid");
+  requireCondition(
+    typeof config.metadata.fly_release_version === "string" &&
+      /^[1-9]\d{0,18}$/.test(config.metadata.fly_release_version),
+    "Machine release version is invalid"
+  );
 }
 
 function collectServingMachines(machines, expectedProcessGroup) {
@@ -266,6 +354,7 @@ function collectServingMachines(machines, expectedProcessGroup) {
     if (machine.state === "destroyed") continue;
 
     requireCondition(isRecord(machine.config), "Machine configuration is missing");
+    assertMachineConfigShape(machine);
     const processGroup = machineProcessGroup(machine);
     const serviceBearing =
       Array.isArray(machine.config.services) && machine.config.services.length > 0;
@@ -336,6 +425,11 @@ function servicePorts(service, desired) {
   const ports = service.ports.map((entry) => {
     requireCondition(isRecord(entry), "Machine service port is invalid");
     const port = exactInteger(entry.port, "Machine service port", 1, 65535);
+    assertExactKeys(
+      entry,
+      port === 80 ? ["force_https", "handlers", "port"] : ["handlers", "port"],
+      "Machine service port"
+    );
     requireCondition(Array.isArray(entry.handlers), "Machine service handlers are missing");
     const handlers = entry.handlers.map((handler) => exactString(handler, "Machine service handler"));
     requireCondition(new Set(handlers).size === handlers.length, "Machine service handlers are duplicated");
@@ -356,7 +450,21 @@ function assertMachineService(machine, desired) {
   const services = machine.config.services;
   requireCondition(Array.isArray(services) && services.length === 1, "Machine services are invalid");
   const service = services[0];
-  requireCondition(isRecord(service), "Machine service is invalid");
+  assertExactKeys(
+    service,
+    [
+      "autostart",
+      "autostop",
+      "checks",
+      "force_instance_key",
+      "internal_port",
+      "min_machines_running",
+      "ports",
+      "protocol",
+    ],
+    "Machine service"
+  );
+  requireCondition(service.force_instance_key === null, "Machine force instance key is invalid");
   requireCondition(service.protocol === "tcp", "Machine service protocol is invalid");
   requireCondition(
     service.internal_port === desired.internalPort,
@@ -379,7 +487,11 @@ function assertMachineService(machine, desired) {
   for (let index = 0; index < desired.checks.length; index += 1) {
     const actual = service.checks[index];
     const expected = desired.checks[index];
-    requireCondition(isRecord(actual), "Machine service check is invalid");
+    assertExactKeys(
+      actual,
+      ["grace_period", "interval", "method", "path", "port", "timeout", "type"],
+      "Machine service check"
+    );
     requireCondition(actual.type === expected.type, "Machine service check type is invalid");
     requireCondition(actual.method === expected.method, "Machine service check method is invalid");
     requireCondition(actual.path === expected.path, "Machine service check path is invalid");
@@ -427,6 +539,7 @@ function assertServiceHealth(machine, desired) {
 }
 
 function assertMachineDefinition(machine, desired, expectedImage) {
+  assertMachineConfigShape(machine);
   requireCondition(machine.cordoned === false, "serving Machine is cordoned");
   requireCondition(machine.config.image === expectedImage.value, "Machine immutable image differs");
   requireCondition(
@@ -1163,6 +1276,7 @@ module.exports = {
   desiredStateForPhase,
   environmentWithoutRedisUrl,
   loadDesiredState,
+  loadDesiredStateFromBytes,
   MACHINE_VERSION_COMMAND,
   normalizeProtocolStatus,
   parseCandidateProtocolStatusOutput,

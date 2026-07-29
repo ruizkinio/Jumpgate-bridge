@@ -543,20 +543,16 @@ jobs:
           --config=fly.toml
           --image="$IMMUTABLE_IMAGE_REF"
           --phase=v6
-      - name: Attest the exact final v6 fleet across repeated intervals
+      - name: Attest the exact final v6 fleet before public smoke
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-        run: |
-          set -euo pipefail
-          attestation_dir="$RUNNER_TEMP/jumpgate-deployment-attestation-$GITHUB_RUN_ID"
-          mkdir "$attestation_dir"
-          node scripts/ci/fly-managed-rollout.js attest \
-            --app=jumpgate-bridge \
-            --config=fly.toml \
-            --image="$IMMUTABLE_IMAGE_REF" \
-            --base-url=https://jumpgate-bridge.fly.dev \
-            --phase=v6 \
-            --receipt="$attestation_dir/managed-fleet-attestation.json"
+        run: >-
+          node scripts/ci/fly-managed-rollout.js attest
+          --app=jumpgate-bridge
+          --config=fly.toml
+          --image="$IMMUTABLE_IMAGE_REF"
+          --base-url=https://jumpgate-bridge.fly.dev
+          --phase=v6
       - name: Validate exact public production provenance without logging bodies
         run: |
           expected_version="$(node -p "require('./package.json').version")"
@@ -574,6 +570,20 @@ jobs:
             echo "- The candidate protocol was probed before rollout; any required transition and the final v6 fleet used the same digest."
             echo "- Final health, readiness, version, manifest, configure, and provenance passed."
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Re-attest final v6 protocol and fleet after public smoke
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          attestation_dir="$RUNNER_TEMP/jumpgate-deployment-attestation-$GITHUB_RUN_ID"
+          mkdir "$attestation_dir"
+          node scripts/ci/fly-managed-rollout.js attest \
+            --app=jumpgate-bridge \
+            --config=fly.toml \
+            --image="$IMMUTABLE_IMAGE_REF" \
+            --base-url=https://jumpgate-bridge.fly.dev \
+            --phase=v6 \
+            --receipt="$attestation_dir/managed-fleet-attestation.json"
       - name: Derive attestation from the final exact Fly state
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

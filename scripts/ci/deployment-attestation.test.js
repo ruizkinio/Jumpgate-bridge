@@ -53,16 +53,23 @@ function machine(id, releaseId = RELEASE_A) {
         cpus: state.guest.cpus,
         memory_mb: state.guest.memoryMb,
       },
+      init: {},
       metadata: {
+        fly_builder_id: "builder-0123456789",
+        fly_flyctl_version: "0.4.69-jumpgate-digest4",
+        fly_platform_version: "v2",
         fly_process_group: state.processGroup,
         fly_release_id: releaseId,
+        fly_release_version: "42",
       },
+      restart: { policy: "on-failure", max_retries: 10 },
       services: [{
         protocol: "tcp",
         internal_port: state.internalPort,
         min_machines_running: state.minMachinesRunning,
         autostart: true,
         autostop: true,
+        force_instance_key: null,
         ports: [
           { port: 80, handlers: ["http"], force_https: true },
           { port: 443, handlers: ["http", "tls"] },
@@ -227,16 +234,44 @@ test("CLI writes one canonical subject and refuses to replace it", (t) => {
   assert.match(second.stderr, /could not be created exclusively/);
 });
 
+test("fly.toml replacement cannot split desired-state parsing from the signed digest", () => {
+  const original = fs.readFileSync(CONFIG);
+  const replacement = Buffer.from(
+    original.toString("utf8").replace(
+      "node scripts/production-release-protocols.js apply-env",
+      "node /tmp/replaced-release.js"
+    )
+  );
+  const originalDigest = createHash("sha256").update(original).digest("hex");
+  const replacementDigest = createHash("sha256").update(replacement).digest("hex");
+  assert.equal(originalDigest, CONFIG_SHA256);
+  assert.notEqual(replacementDigest, originalDigest);
+
+  const { loadDesiredStateFromBytes } = require("./fly-managed-rollout");
+  assert.equal(
+    loadDesiredStateFromBytes(original, "jumpgate-bridge").releaseCommand,
+    "node scripts/production-release-protocols.js apply-env"
+  );
+  assert.throws(
+    () => loadDesiredStateFromBytes(replacement, "jumpgate-bridge"),
+    /release command/
+  );
+});
+
 test("workflow uses the complete Machine list and isolates OIDC signing", () => {
   const workflow = fs.readFileSync(WORKFLOW, "utf8").replace(/\r\n/g, "\n");
-  const repeatedIndex = workflow.indexOf("      - name: Attest the exact final v6 fleet across repeated intervals\n");
+  const repeatedIndex = workflow.indexOf("      - name: Attest the exact final v6 fleet before public smoke\n");
   const smokeIndex = workflow.indexOf(
     "      - name: Validate exact public production provenance without logging bodies\n"
   );
   const deriveIndex = workflow.indexOf("      - name: Derive attestation from the final exact Fly state\n");
+  const postSmokeIndex = workflow.indexOf(
+    "      - name: Re-attest final v6 protocol and fleet after public smoke\n"
+  );
   const signerIndex = workflow.indexOf("  deployment-provenance:\n");
   assert.equal(
-    repeatedIndex >= 0 && smokeIndex > repeatedIndex && deriveIndex > smokeIndex && signerIndex > deriveIndex,
+    repeatedIndex >= 0 && smokeIndex > repeatedIndex && postSmokeIndex > smokeIndex &&
+      deriveIndex > postSmokeIndex && signerIndex > deriveIndex,
     true
   );
   const deriveBlock = workflow.slice(deriveIndex, signerIndex);

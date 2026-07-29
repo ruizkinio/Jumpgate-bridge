@@ -6,7 +6,7 @@ const path = require("node:path");
 
 const {
   desiredStateForPhase,
-  loadDesiredState,
+  loadDesiredStateFromBytes,
   validateFleetSnapshot,
 } = require("./fly-managed-rollout");
 
@@ -261,7 +261,7 @@ function main(args = process.argv.slice(2)) {
   const configBytes = readStableRegularFile(values.config, "fly.toml");
   const machineList = parseJsonDocument(machineBytes, "Fly Machine list");
   const receipt = parseJsonDocument(receiptBytes, "managed fleet receipt");
-  const desired = loadDesiredState(values.config, APPLICATION);
+  const desired = loadDesiredStateFromBytes(configBytes, APPLICATION);
   const configDigest = createHash("sha256").update(configBytes).digest("hex");
   const attestation = buildDeploymentAttestation(
     machineList,

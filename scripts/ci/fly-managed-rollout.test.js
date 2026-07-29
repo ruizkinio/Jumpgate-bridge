@@ -14,6 +14,7 @@ const {
   convergeFleet,
   desiredStateForPhase,
   loadDesiredState,
+  loadDesiredStateFromBytes,
   MACHINE_VERSION_COMMAND,
   parseCandidateProtocolStatusOutput,
   planWriterProtocolRollout,
@@ -74,16 +75,23 @@ function machine(id, desired, overrides = {}) {
         cpus: desired.guest.cpus,
         memory_mb: desired.guest.memoryMb,
       },
+      init: {},
       metadata: {
+        fly_builder_id: "builder-0123456789",
+        fly_flyctl_version: "0.4.69-jumpgate-digest4",
+        fly_platform_version: "v2",
         fly_process_group: desired.processGroup,
         fly_release_id: RELEASE_A,
+        fly_release_version: "42",
       },
+      restart: { policy: "on-failure", max_retries: 10 },
       services: [{
         protocol: "tcp",
         internal_port: 7515,
         min_machines_running: 2,
         autostart: true,
         autostop: true,
+        force_instance_key: null,
         ports: [
           { port: 80, handlers: ["http"], force_https: true },
           { port: 443, handlers: ["tls", "http"] },
@@ -197,14 +205,14 @@ test("fleet attestation requires two exact healthy serving Machines", () => {
   foreignService.config.metadata.fly_process_group = "worker";
   assert.throws(
     () => validateFleetSample([...sample, foreignService], desired, IMAGE),
-    /outside the managed app process group/
+    /process group/
   );
   const unknownProcess = machine(MACHINE_C, desired);
   delete unknownProcess.config.metadata.fly_process_group;
   unknownProcess.config.services = [];
   assert.throws(
     () => validateFleetSample([...sample, unknownProcess], desired, IMAGE),
-    /unexpected Machine process group/
+    /metadata shape/
   );
   const serviceLessApp = machine(MACHINE_C, desired);
   serviceLessApp.config.services = [];
@@ -267,7 +275,7 @@ test("fleet attestation requires two exact healthy serving Machines", () => {
   delete missingRelease.config.metadata.fly_release_id;
   assert.throws(
     () => validateFleetSample([machine(MACHINE_A, desired), missingRelease], desired, IMAGE),
-    /release id is invalid/
+    /metadata shape/
   );
   const mixedRelease = machine(MACHINE_B, desired);
   mixedRelease.config.metadata.fly_release_id = RELEASE_B;
@@ -275,6 +283,65 @@ test("fleet attestation requires two exact healthy serving Machines", () => {
     () => validateFleetSample([machine(MACHINE_A, desired), mixedRelease], desired, IMAGE),
     /do not share one release id/
   );
+
+  const configurationMutations = [
+    ["command override", (value) => { value.config.cmd = ["/bin/sh", "-c", "evil"]; }],
+    ["entrypoint override", (value) => { value.config.entrypoint = ["/tmp/evil"]; }],
+    ["injected file", (value) => { value.config.files = [{ guest_path: "/tmp/evil" }]; }],
+    ["injected mount", (value) => { value.config.mounts = [{ path: "/data" }]; }],
+    ["restart policy drift", (value) => { value.config.restart.policy = "always"; }],
+    ["restart retry drift", (value) => { value.config.restart.max_retries = 99; }],
+    ["guest executable field", (value) => { value.config.guest.kernel_args = ["init=/evil"]; }],
+    ["service executable field", (value) => { value.config.services[0].exec = ["/evil"]; }],
+    ["force instance key", (value) => { value.config.services[0].force_instance_key = "shared"; }],
+    ["service port field", (value) => { value.config.services[0].ports[0].proxy_proto = "v2"; }],
+    ["service check field", (value) => { value.config.services[0].checks[0].headers = {}; }],
+  ];
+  for (const [name, mutate] of configurationMutations) {
+    const candidate = machine(MACHINE_B, desired);
+    mutate(candidate);
+    assert.throws(
+      () => validateFleetSample([machine(MACHINE_A, desired), candidate], desired, IMAGE),
+      /shape|restart|force instance/,
+      name
+    );
+  }
+});
+
+test("desired state parsing is bound to one captured fly.toml byte sequence", () => {
+  const original = fs.readFileSync(CONFIG);
+  const desired = loadDesiredStateFromBytes(original, "jumpgate-bridge");
+  assert.equal(desired.releaseCommand, "node scripts/production-release-protocols.js apply-env");
+
+  const replacement = Buffer.from(
+    original.toString("utf8").replace(
+      "node scripts/production-release-protocols.js apply-env",
+      "node /tmp/unreviewed-release.js"
+    )
+  );
+  assert.throws(
+    () => loadDesiredStateFromBytes(replacement, "jumpgate-bridge"),
+    /release command/
+  );
+  assert.equal(
+    loadDesiredStateFromBytes(original, "jumpgate-bridge").releaseCommand,
+    desired.releaseCommand
+  );
+
+  const source = original.toString("utf8").replace(/\r\n/g, "\n");
+  const unreviewedMutations = [
+    source.replace("[build]\n", "[build]\n  dockerfile = 'Dockerfile.evil'\n"),
+    source.replace("primary_region = 'iad'\n", "primary_region = 'iad'\nkill_signal = 'SIGKILL'\n"),
+    source.replace("[env]\n", "[env]\n  NODE_OPTIONS = '--require=/tmp/evil.js'\n"),
+    source.replace("[deploy]\n", "[processes]\n  app = 'node /tmp/evil.js'\n\n[deploy]\n"),
+    source + "\n[[mounts]]\n  source = 'data'\n  destination = '/data'\n",
+  ];
+  for (const mutation of unreviewedMutations) {
+    assert.throws(
+      () => loadDesiredStateFromBytes(Buffer.from(mutation), "jumpgate-bridge"),
+      /shape/
+    );
+  }
 });
 
 test("phase-specific attestation cannot confuse transition and final v6 fleets", () => {
@@ -711,6 +778,35 @@ test("attestation requires the exact Redis protocol at each rollout boundary", a
     }),
     (error) => error.code === "fly_protocol_boundary_invalid"
   );
+
+  const preSmoke = await attestRepeatedly({
+    desired,
+    phase: "v6",
+    image: IMAGE,
+    intervals: 3,
+    delayMs: 0,
+    sample: async () => [machine(MACHINE_A, desired), machine(MACHINE_B, desired)],
+    externalProbe: async () => {},
+    protocolProbe: async () => protocolStatus("ready", "6"),
+    versionProbe: async () => machineVersion(),
+    sleep: async () => {},
+  });
+  assert.equal(preSmoke.protocolVersion, "6");
+  await assert.rejects(
+    attestRepeatedly({
+      desired,
+      phase: "v6",
+      image: IMAGE,
+      intervals: 3,
+      delayMs: 0,
+      sample: async () => [machine(MACHINE_A, desired), machine(MACHINE_B, desired)],
+      externalProbe: async () => {},
+      protocolProbe: async () => protocolStatus("ready", "5"),
+      versionProbe: async () => machineVersion(),
+      sleep: async () => {},
+    }),
+    (error) => error.code === "fly_protocol_boundary_invalid"
+  );
 });
 
 test("first rollout, v5 retry, and v6 steady state choose only safe phase orderings", () => {
@@ -927,6 +1023,14 @@ test("workflow probes first, conditionally transitions, and always finishes on v
     "fly-managed-rollout.js attest",
     finalConvergence
   );
+  const publicSmoke = workflow.indexOf(
+    "      - name: Validate exact public production provenance without logging bodies\n",
+    finalAttestation
+  );
+  const postSmokeAttestation = workflow.indexOf(
+    "fly-managed-rollout.js attest",
+    publicSmoke
+  );
 
   assert.match(workflow, /fly-managed-rollout\.js validate/);
   assert.match(workflow, /FLYCTL_VERSION: "0\.4\.69-jumpgate-digest4"/);
@@ -962,6 +1066,8 @@ test("workflow probes first, conditionally transitions, and always finishes on v
   assert.ok(finalDeploy > transitionAttestation);
   assert.ok(finalConvergence > finalDeploy);
   assert.ok(finalAttestation > finalConvergence);
+  assert.ok(publicSmoke > finalAttestation);
+  assert.ok(postSmokeAttestation > publicSmoke);
   assert.equal(
     (workflow.match(/if: steps\.writer-protocol\.outputs\.transition_required == 'true'/g) || [])
       .length,
@@ -973,10 +1079,10 @@ test("workflow probes first, conditionally transitions, and always finishes on v
   );
   assert.equal((workflow.match(/--image "\$IMMUTABLE_IMAGE_REF"/g) || []).length, 2);
   assert.equal((workflow.match(/fly-managed-rollout\.js converge/g) || []).length, 2);
-  assert.equal((workflow.match(/fly-managed-rollout\.js attest/g) || []).length, 2);
-  assert.equal((workflow.match(/--image="\$IMMUTABLE_IMAGE_REF"/g) || []).length, 5);
+  assert.equal((workflow.match(/fly-managed-rollout\.js attest/g) || []).length, 3);
+  assert.equal((workflow.match(/--image="\$IMMUTABLE_IMAGE_REF"/g) || []).length, 6);
   assert.equal((workflow.match(/--phase=transition/g) || []).length, 2);
-  assert.equal((workflow.match(/--phase=v6/g) || []).length, 2);
+  assert.equal((workflow.match(/--phase=v6/g) || []).length, 3);
   assert.match(
     workflow,
     /test\/provider-snapshot-recovery-integration\.test\.js\s+test\/playback-claim-writer-protocol-redis\.test\.js/
