@@ -12,6 +12,8 @@ GitHub repository settings remain external to this workflow. Before enabling rel
   - `Immutable production image / PostgreSQL + Redis + private S3`
 - Do not make `Fly production / exact tested digest` a required pre-merge status check;
   it is the post-validation deployment job.
+- Do not make `Fly deployment provenance / GitHub OIDC` a required pre-merge status
+  check; it is the least-privilege signing job after a successful production deployment.
 - Create and protect the `production` environment, restrict it to protected `main`,
   and add independent reviewers when the repository has eligible maintainers.
 - Store `FLY_API_TOKEN` only as a secret in that `production` environment.

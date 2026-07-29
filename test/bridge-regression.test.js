@@ -2516,6 +2516,9 @@ test("backup request logs redact IDs while preserving route diagnostics", async 
       assert.equal(redacted.includes(host), false, host);
     }
   }
+  assert.equal(app.sanitizeLogFieldForTest("safe\r\nforged\u007fentry", 64), "safe??forged?entry");
+  assert.equal(app.sanitizeLogFieldForTest("x".repeat(8), 4), "xxxx<truncated>");
+  assert.equal(/[\r\n]/.test(app.redactPathForLogForTest("/safe\r\nforged")), false);
 });
 
 test("cleanup runner prunes every pass and contains prune and timer failures", async (t) => {

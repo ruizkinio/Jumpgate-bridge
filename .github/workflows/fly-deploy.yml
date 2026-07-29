@@ -372,6 +372,8 @@ jobs:
        (github.event_name == 'workflow_dispatch' && inputs.deploy))
     runs-on: ubuntu-latest
     timeout-minutes: 210
+    permissions:
+      contents: read
     # Branch protection and the protected production environment are external
     # repository settings documented in scripts/ci/RELEASE_GATES.md.
     environment:
@@ -541,7 +543,7 @@ jobs:
           --config=fly.toml
           --image="$IMMUTABLE_IMAGE_REF"
           --phase=v6
-      - name: Attest the exact final v6 fleet across repeated intervals
+      - name: Attest the exact final v6 fleet before public smoke
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: >-
@@ -568,3 +570,67 @@ jobs:
             echo "- The candidate protocol was probed before rollout; any required transition and the final v6 fleet used the same digest."
             echo "- Final health, readiness, version, manifest, configure, and provenance passed."
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Re-attest final v6 protocol and fleet after public smoke
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          attestation_dir="$RUNNER_TEMP/jumpgate-deployment-attestation-$GITHUB_RUN_ID"
+          mkdir "$attestation_dir"
+          node scripts/ci/fly-managed-rollout.js attest \
+            --app=jumpgate-bridge \
+            --config=fly.toml \
+            --image="$IMMUTABLE_IMAGE_REF" \
+            --base-url=https://jumpgate-bridge.fly.dev \
+            --phase=v6 \
+            --receipt="$attestation_dir/managed-fleet-attestation.json"
+      - name: Derive attestation from the final exact Fly state
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          NO_COLOR: "1"
+        run: |
+          set -euo pipefail
+          attestation_dir="$RUNNER_TEMP/jumpgate-deployment-attestation-$GITHUB_RUN_ID"
+          status_file="$attestation_dir/fly-machine-list.json"
+          "$FLYCTL_BIN" machine list --app jumpgate-bridge --json > "$status_file"
+          node scripts/ci/deployment-attestation.js \
+            --status-file="$status_file" \
+            --receipt-file="$attestation_dir/managed-fleet-attestation.json" \
+            --config=fly.toml \
+            --output="$attestation_dir/deployment-attestation.json" \
+            --bridge-commit="$GITHUB_SHA" \
+            --image-digest="$IMAGE_DIGEST" \
+            --workflow-run-id="$GITHUB_RUN_ID"
+      - name: Preserve exact deployment attestation
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: jumpgate-deployment-attestation-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          path: ${{ runner.temp }}/jumpgate-deployment-attestation-${{ github.run_id }}/deployment-attestation.json
+          if-no-files-found: error
+          retention-days: 35
+          compression-level: 0
+
+  deployment-provenance:
+    name: Fly deployment provenance / GitHub OIDC
+    needs: deploy
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      github.ref_protected == true &&
+      (github.event_name == 'push' ||
+       (github.event_name == 'workflow_dispatch' && inputs.deploy))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - name: Download exact deployment attestation
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: jumpgate-deployment-attestation-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          path: ${{ runner.temp }}/jumpgate-deployment-attestation-${{ github.run_id }}
+      - name: Sign deployment attestation through GitHub OIDC
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+        with:
+          subject-path: ${{ runner.temp }}/jumpgate-deployment-attestation-${{ github.run_id }}/deployment-attestation.json

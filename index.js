@@ -1825,6 +1825,13 @@ function normalizeUnreservedPathEncoding(rawPath) {
   });
 }
 
+function sanitizeLogField(value, maximumLength = 512) {
+  const sanitized = String(value || "").replace(/[\u0000-\u001f\u007f-\u009f]/g, "?");
+  return sanitized.length <= maximumLength
+    ? sanitized
+    : sanitized.slice(0, maximumLength) + "<truncated>";
+}
+
 function redactPathForLog(rawPath) {
   const raw = normalizeRequestTargetForLog(rawPath);
   const noQuery = normalizeUnreservedPathEncoding(raw.split("?")[0].split("#")[0]);
@@ -1850,7 +1857,7 @@ function redactPathForLog(rawPath) {
     /^\/v1\/subtitles\/(?!(?:discover|resolve)$).*/i,
     "/v1/subtitles/<redacted>"
   );
-  return p;
+  return sanitizeLogField(p, 2048);
 }
 
 function safeReqUrlForLog(req) {
@@ -1952,6 +1959,7 @@ if (process.env.NODE_ENV === "test") {
   });
   app.mapWithConcurrencyForTest = mapWithConcurrency;
   app.redactPathForLogForTest = redactPathForLog;
+  app.sanitizeLogFieldForTest = sanitizeLogField;
   app.createStorageCleanupRunnerForTest = createStorageCleanupRunner;
   app.resolvePublicationPresentationForTest = resolvePublicationPresentation;
   app.renderPublicationPolicyLinksForTest = renderPublicationPolicyLinks;
@@ -2910,23 +2918,31 @@ app.get("/", (_req, res) => res.redirect("/configure"));
 
 app.get("/favicon.ico", (_req, res) => res.status(204).end());
 
-const CONFIGURE_ASSETS = new Map([
-  ["configure.css", { contentType: "text/css; charset=utf-8", maxAge: 300 }],
-  ["configure.js", { contentType: "application/javascript; charset=utf-8", maxAge: 300 }],
-  ["stremio-account-client.js", { contentType: "application/javascript; charset=utf-8", maxAge: 300 }],
-  ["jumpgate-mark.svg", { contentType: "image/svg+xml; charset=utf-8", maxAge: 86400, publicMedia: true }],
-  ["jumpgate-mark.png", { contentType: "image/png", maxAge: 86400, publicMedia: true }],
-  ["jumpgate-backdrop.svg", { contentType: "image/svg+xml; charset=utf-8", maxAge: 86400, publicMedia: true }],
-  ["jumpgate-backdrop.jpg", { contentType: "image/jpeg", maxAge: 86400, publicMedia: true }],
-  ["trakt-lockup-negative.svg", { contentType: "image/svg+xml; charset=utf-8", maxAge: 86400 }],
-  ["Trakt-BRANDING.txt", { contentType: "text/plain; charset=utf-8", maxAge: 86400 }],
-  ["RobotoCondensed-Variable.ttf", { contentType: "font/ttf", maxAge: 86400 }],
-  ["RobotoCondensed-OFL.txt", { contentType: "text/plain; charset=utf-8", maxAge: 86400 }],
-  ["Oxanium-Variable.ttf", { contentType: "font/ttf", maxAge: 86400 }],
-  ["Oxanium-OFL.txt", { contentType: "text/plain; charset=utf-8", maxAge: 86400 }],
-  ["SourceSans3-Variable.ttf", { contentType: "font/ttf", maxAge: 86400 }],
-  ["SourceSans3-OFL.txt", { contentType: "text/plain; charset=utf-8", maxAge: 86400 }],
-]);
+const CONFIGURE_ASSETS = new Map(
+  [
+    ["configure.css", { contentType: "text/css; charset=utf-8", maxAge: 300 }],
+    ["configure.js", { contentType: "application/javascript; charset=utf-8", maxAge: 300 }],
+    ["stremio-account-client.js", { contentType: "application/javascript; charset=utf-8", maxAge: 300 }],
+    ["jumpgate-mark.svg", { contentType: "image/svg+xml; charset=utf-8", maxAge: 86400, publicMedia: true }],
+    ["jumpgate-mark.png", { contentType: "image/png", maxAge: 86400, publicMedia: true }],
+    ["jumpgate-backdrop.svg", { contentType: "image/svg+xml; charset=utf-8", maxAge: 86400, publicMedia: true }],
+    ["jumpgate-backdrop.jpg", { contentType: "image/jpeg", maxAge: 86400, publicMedia: true }],
+    ["trakt-lockup-negative.svg", { contentType: "image/svg+xml; charset=utf-8", maxAge: 86400 }],
+    ["Trakt-BRANDING.txt", { contentType: "text/plain; charset=utf-8", maxAge: 86400 }],
+    ["RobotoCondensed-Variable.ttf", { contentType: "font/ttf", maxAge: 86400 }],
+    ["RobotoCondensed-OFL.txt", { contentType: "text/plain; charset=utf-8", maxAge: 86400 }],
+    ["Oxanium-Variable.ttf", { contentType: "font/ttf", maxAge: 86400 }],
+    ["Oxanium-OFL.txt", { contentType: "text/plain; charset=utf-8", maxAge: 86400 }],
+    ["SourceSans3-Variable.ttf", { contentType: "font/ttf", maxAge: 86400 }],
+    ["SourceSans3-OFL.txt", { contentType: "text/plain; charset=utf-8", maxAge: 86400 }],
+  ].map(([fileName, asset]) => [
+    fileName,
+    Object.freeze({
+      ...asset,
+      absolutePath: path.join(__dirname, "public", fileName),
+    }),
+  ])
+);
 
 app.get("/assets/:asset", (req, res, next) => {
   const asset = CONFIGURE_ASSETS.get(req.params.asset);
@@ -2937,7 +2953,7 @@ app.get("/assets/:asset", (req, res, next) => {
   res.setHeader("Referrer-Policy", "no-referrer");
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("Content-Type", asset.contentType);
-  res.sendFile(path.join(__dirname, "public", req.params.asset));
+  res.sendFile(asset.absolutePath);
 });
 
 app.get("/p/:code", (req, res) => {
@@ -3092,7 +3108,9 @@ function sendPairingFailure(res, error) {
   if (error instanceof TypeError) {
     return res.status(400).json({ ok: false, error: "Invalid pairing request" });
   }
-  console.error("[pairing] operation failed" + (code ? " code=" + code : ""));
+  const logCode =
+    typeof code === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(code) ? code : "";
+  console.error("[pairing] operation failed" + (logCode ? " code=" + logCode : ""));
   return res.status(500).json({ ok: false, error: "Pairing is temporarily unavailable" });
 }
 
@@ -4158,7 +4176,7 @@ async function configuredStreamHandler(req, res) {
   const abort = requestAbortSignal(req, res);
   try {
     const request = rawGatewayRequestFromUrl(req, "stream");
-    console.log("[stream:configured] " + request.type + " profile=" + req.profileLogHash);
+    console.log("[stream:configured] profile=" + req.profileLogHash);
     const display = await loadConfiguredStreamDisplay(
       request,
       (req.userConfig && req.userConfig.tmdbKey) || "",
@@ -4184,7 +4202,7 @@ async function configuredSubtitlesHandler(req, res) {
   const abort = requestAbortSignal(req, res);
   try {
     const request = rawGatewayRequestFromUrl(req, "subtitles");
-    console.log("[subtitles:configured] " + request.type + " profile=" + req.profileLogHash);
+    console.log("[subtitles:configured] profile=" + req.profileLogHash);
     const response = await providerGatewayService.query(
       req.profileId,
       request,
@@ -4212,10 +4230,6 @@ async function configuredCatalogHandler(req, res) {
   );
   console.log(
     "[catalog:configured] " +
-      req.params.type +
-      "/" +
-      catalogId +
-      " -> " +
       metas.length +
       " items (hash: " +
       req.profileLogHash +

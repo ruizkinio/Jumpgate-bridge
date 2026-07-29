@@ -1139,6 +1139,7 @@ function validatePublicationGate(documents, options = {}) {
     const expectedJobIds = [
       "container-smoke",
       "deploy",
+      "deployment-provenance",
       "fingerprint-parity",
       "postgres-live",
       "quality",
@@ -1335,15 +1336,33 @@ function scanCredentialBytes(bytes) {
   return patterns.filter((entry) => entry[1].test(text)).map((entry) => entry[0]);
 }
 
+function readStableRegularFile(absolute, invalidMessage) {
+  let descriptor = null;
+  try {
+    const noFollow = fs.constants.O_NOFOLLOW || 0;
+    descriptor = fs.openSync(absolute, fs.constants.O_RDONLY | noFollow);
+    const opened = fs.fstatSync(descriptor, { bigint: true });
+    const materialized = fs.lstatSync(absolute, { bigint: true });
+    if (
+      !opened.isFile() ||
+      !materialized.isFile() ||
+      materialized.isSymbolicLink() ||
+      opened.dev !== materialized.dev ||
+      opened.ino !== materialized.ino
+    ) {
+      throw new Error(invalidMessage);
+    }
+    return fs.readFileSync(descriptor);
+  } finally {
+    if (descriptor !== null) fs.closeSync(descriptor);
+  }
+}
+
 function readMaterializedBytes(root, filename) {
   const segments = portableIndexPath(filename);
   if (segments === null) throw new Error("materialized path is unsafe");
   const absolute = path.join(root, ...segments);
-  const stat = fs.lstatSync(absolute);
-  if (!stat.isFile() || stat.isSymbolicLink()) {
-    throw new Error("materialized entry is not a regular file");
-  }
-  return fs.readFileSync(absolute);
+  return readStableRegularFile(absolute, "materialized entry is not a regular file");
 }
 
 function snapshotMaterializedFiles(root) {
@@ -1579,11 +1598,10 @@ function inspectMaterializedPackageArtifact(materializedRoot, options = {}) {
       throw new Error("npm pack did not produce exactly one artifact");
     }
     const artifactPath = path.join(packDirectory, result.filename);
-    const stat = fs.lstatSync(artifactPath);
-    if (!stat.isFile() || stat.isSymbolicLink()) {
-      throw new Error("npm pack did not produce one regular artifact");
-    }
-    const tarball = fs.readFileSync(artifactPath);
+    const tarball = readStableRegularFile(
+      artifactPath,
+      "npm pack did not produce one regular artifact"
+    );
     const sha1 = crypto.createHash("sha1").update(tarball).digest("hex");
     const integrity = "sha512-" + crypto.createHash("sha512").update(tarball).digest("base64");
     if (result.size !== tarball.length || result.shasum !== sha1 || result.integrity !== integrity) {
@@ -1908,6 +1926,7 @@ module.exports = {
   materializeSelectedIndex,
   parseGitIndexEntries,
   parseWorkflowReleaseMetadata,
+  readStableRegularFile,
   readIndexedFileBytes,
   runPolicy,
   scanCredentialBytes,

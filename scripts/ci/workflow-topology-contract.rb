@@ -128,6 +128,7 @@ def inspect_workflow(document)
       "if" => scalar_value(mapping_value(job, "if")),
       "runsOn" => scalar_value(mapping_value(job, "runs-on")),
       "timeoutMinutes" => scalar_value(mapping_value(job, "timeout-minutes")),
+      "permissions" => scalar_mapping(mapping_value(job, "permissions")),
       "strategy" => literal_node(mapping_value(job, "strategy")),
       "services" => literal_node(mapping_value(job, "services")),
       "env" => scalar_mapping(mapping_value(job, "env")),
