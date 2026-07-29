@@ -1466,6 +1466,7 @@ function validateWorkflow(source) {
     "if",
     "runs-on",
     "timeout-minutes",
+    "permissions",
     "environment",
     "concurrency",
     "steps",
