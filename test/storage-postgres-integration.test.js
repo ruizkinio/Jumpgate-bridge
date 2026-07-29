@@ -1313,7 +1313,9 @@ test(
         "g1:mixed_postgres_" + String(++generationSequence).padStart(8, "0"),
       sourceContextOptions: {
         idFactory: (kind) => kind + "_mixed_postgres_0001",
-        providerMutationLeaseMs: 50,
+        // Recovery cases below force expiry explicitly; ordinary PostgreSQL round trips
+        // must not race a scheduler-scale lease.
+        providerMutationLeaseMs: 5_000,
       },
     });
 
