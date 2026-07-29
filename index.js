@@ -4176,12 +4176,7 @@ async function configuredStreamHandler(req, res) {
   const abort = requestAbortSignal(req, res);
   try {
     const request = rawGatewayRequestFromUrl(req, "stream");
-    console.log(
-      "[stream:configured] " +
-        sanitizeLogField(request.type, 64) +
-        " profile=" +
-        req.profileLogHash
-    );
+    console.log("[stream:configured] profile=" + req.profileLogHash);
     const display = await loadConfiguredStreamDisplay(
       request,
       (req.userConfig && req.userConfig.tmdbKey) || "",
@@ -4207,12 +4202,7 @@ async function configuredSubtitlesHandler(req, res) {
   const abort = requestAbortSignal(req, res);
   try {
     const request = rawGatewayRequestFromUrl(req, "subtitles");
-    console.log(
-      "[subtitles:configured] " +
-        sanitizeLogField(request.type, 64) +
-        " profile=" +
-        req.profileLogHash
-    );
+    console.log("[subtitles:configured] profile=" + req.profileLogHash);
     const response = await providerGatewayService.query(
       req.profileId,
       request,
@@ -4240,10 +4230,6 @@ async function configuredCatalogHandler(req, res) {
   );
   console.log(
     "[catalog:configured] " +
-      sanitizeLogField(req.params.type, 64) +
-      "/" +
-      sanitizeLogField(catalogId, 128) +
-      " -> " +
       metas.length +
       " items (hash: " +
       req.profileLogHash +
