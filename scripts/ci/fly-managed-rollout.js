@@ -487,16 +487,25 @@ function assertMachineService(machine, desired) {
   for (let index = 0; index < desired.checks.length; index += 1) {
     const actual = service.checks[index];
     const expected = desired.checks[index];
+    const hasExplicitPort = Object.prototype.hasOwnProperty.call(actual, "port");
     assertExactKeys(
       actual,
-      ["grace_period", "interval", "method", "path", "port", "timeout", "type"],
+      [
+        "grace_period",
+        "interval",
+        "method",
+        "path",
+        ...(hasExplicitPort ? ["port"] : []),
+        "timeout",
+        "type",
+      ],
       "Machine service check"
     );
     requireCondition(actual.type === expected.type, "Machine service check type is invalid");
     requireCondition(actual.method === expected.method, "Machine service check method is invalid");
     requireCondition(actual.path === expected.path, "Machine service check path is invalid");
     requireCondition(
-      (actual.port ?? service.internal_port) === expected.port,
+      (hasExplicitPort ? actual.port : service.internal_port) === expected.port,
       "Machine service check port is invalid"
     );
     requireCondition(

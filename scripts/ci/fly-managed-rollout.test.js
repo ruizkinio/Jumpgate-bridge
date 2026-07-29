@@ -271,6 +271,26 @@ test("fleet attestation requires two exact healthy serving Machines", () => {
     () => validateFleetSample([machine(MACHINE_A, desired), weakCheck], desired, IMAGE),
     /check interval/
   );
+  const implicitCheckPort = [machine(MACHINE_A, desired), machine(MACHINE_B, desired)];
+  for (const candidate of implicitCheckPort) {
+    delete candidate.config.services[0].checks[0].port;
+  }
+  assert.deepEqual(
+    validateFleetSample(implicitCheckPort, desired, IMAGE),
+    [MACHINE_A, MACHINE_B]
+  );
+  const nullCheckPort = machine(MACHINE_B, desired);
+  nullCheckPort.config.services[0].checks[0].port = null;
+  assert.throws(
+    () => validateFleetSample([machine(MACHINE_A, desired), nullCheckPort], desired, IMAGE),
+    /check port/
+  );
+  const wrongCheckPort = machine(MACHINE_B, desired);
+  wrongCheckPort.config.services[0].checks[0].port = 7516;
+  assert.throws(
+    () => validateFleetSample([machine(MACHINE_A, desired), wrongCheckPort], desired, IMAGE),
+    /check port/
+  );
   const missingRelease = machine(MACHINE_B, desired);
   delete missingRelease.config.metadata.fly_release_id;
   assert.throws(
