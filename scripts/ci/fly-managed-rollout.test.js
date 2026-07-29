@@ -23,6 +23,7 @@ const {
   startMachine,
   validateConvergenceSample,
   validateFleetSample,
+  validateFleetSnapshot,
 } = require("./fly-managed-rollout");
 
 const ROOT = path.join(__dirname, "..", "..");
@@ -35,6 +36,8 @@ const PACKAGE_VERSION = require(path.join(ROOT, "package.json")).version;
 const MACHINE_A = "0123456789abcd";
 const MACHINE_B = "1123456789abcd";
 const MACHINE_C = "2123456789abcd";
+const RELEASE_A = "rel_1234567890abcdef";
+const RELEASE_B = "rel_abcdef1234567890";
 
 function protocolStatus(state, version) {
   return {
@@ -71,7 +74,10 @@ function machine(id, desired, overrides = {}) {
         cpus: desired.guest.cpus,
         memory_mb: desired.guest.memoryMb,
       },
-      metadata: { fly_process_group: desired.processGroup },
+      metadata: {
+        fly_process_group: desired.processGroup,
+        fly_release_id: RELEASE_A,
+      },
       services: [{
         protocol: "tcp",
         internal_port: 7515,
@@ -168,6 +174,10 @@ test("fleet attestation requires two exact healthy serving Machines", () => {
   const desired = loadDesiredState(CONFIG, "jumpgate-bridge");
   const sample = [machine(MACHINE_A, desired), machine(MACHINE_B, desired)];
   assert.deepEqual(validateFleetSample(sample, desired, IMAGE), [MACHINE_A, MACHINE_B]);
+  assert.deepEqual(validateFleetSnapshot(sample, desired, IMAGE), {
+    machineIds: [MACHINE_A, MACHINE_B],
+    releaseId: RELEASE_A,
+  });
   assert.throws(
     () => validateFleetSample(sample.slice(0, 1), desired, IMAGE),
     /exactly two serving app Machines/
@@ -253,6 +263,18 @@ test("fleet attestation requires two exact healthy serving Machines", () => {
     () => validateFleetSample([machine(MACHINE_A, desired), weakCheck], desired, IMAGE),
     /check interval/
   );
+  const missingRelease = machine(MACHINE_B, desired);
+  delete missingRelease.config.metadata.fly_release_id;
+  assert.throws(
+    () => validateFleetSample([machine(MACHINE_A, desired), missingRelease], desired, IMAGE),
+    /release id is invalid/
+  );
+  const mixedRelease = machine(MACHINE_B, desired);
+  mixedRelease.config.metadata.fly_release_id = RELEASE_B;
+  assert.throws(
+    () => validateFleetSample([machine(MACHINE_A, desired), mixedRelease], desired, IMAGE),
+    /do not share one release id/
+  );
 });
 
 test("phase-specific attestation cannot confuse transition and final v6 fleets", () => {
@@ -317,6 +339,7 @@ test("managed attestation probes both Machines and external readiness across int
   assert.equal(result.intervals, 3);
   assert.equal(result.phase, "v6");
   assert.equal(result.protocolVersion, "6");
+  assert.equal(result.releaseId, RELEASE_A);
   assert.equal(samples, 3);
   assert.equal(probes, 3);
   assert.deepEqual(protocolProbes, [
@@ -330,6 +353,36 @@ test("managed attestation probes both Machines and external readiness across int
     MACHINE_A, MACHINE_B,
   ]);
   assert.equal(sleeps, 2);
+});
+
+test("managed attestation rejects a release replacement across stable Machine ids", async () => {
+  const desired = loadDesiredState(CONFIG, "jumpgate-bridge");
+  let sampleIndex = 0;
+  await assert.rejects(
+    attestRepeatedly({
+      desired,
+      phase: "v6",
+      image: IMAGE,
+      intervals: 3,
+      delayMs: 0,
+      sample: async () => {
+        sampleIndex += 1;
+        const second = machine(MACHINE_B, desired);
+        if (sampleIndex > 1) {
+          second.config.metadata.fly_release_id = RELEASE_B;
+          const first = machine(MACHINE_A, desired);
+          first.config.metadata.fly_release_id = RELEASE_B;
+          return [first, second];
+        }
+        return [machine(MACHINE_A, desired), second];
+      },
+      externalProbe: async () => {},
+      protocolProbe: async () => protocolStatus("ready", "6"),
+      versionProbe: async () => machineVersion(),
+      sleep: async () => {},
+    }),
+    /release changed during attestation/
+  );
 });
 
 test("attestation rejects a missing or wrong management capability on either Machine", async () => {
@@ -850,7 +903,7 @@ test("Machine runtime version probe is targeted, bounded, exact, and secret-safe
 
 test("workflow probes first, conditionally transitions, and always finishes on v6 in order", () => {
   const workflow = fs.readFileSync(path.join(ROOT, ".github", "workflows", "fly-deploy.yml"),
-    "utf8");
+    "utf8").replace(/\r\n/g, "\n");
   const candidatePlan = workflow.indexOf("fly-managed-rollout.js plan");
   const transitionDeploy = workflow.indexOf(
     "--env JUMPGATE_REDIS_PLAYBACK_CLAIM_ROLLOUT_MODE=transition"

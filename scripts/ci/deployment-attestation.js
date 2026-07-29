@@ -1,18 +1,28 @@
 "use strict";
 
+const { createHash } = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 
+const {
+  desiredStateForPhase,
+  loadDesiredState,
+  validateFleetSnapshot,
+} = require("./fly-managed-rollout");
+
 const APPLICATION = "jumpgate-bridge";
 const WORKFLOW_ID = 320575057;
-const MAX_STATUS_BYTES = 4 * 1024 * 1024;
+const MAX_DOCUMENT_BYTES = 4 * 1024 * 1024;
 const COMMIT_PATTERN = /^[a-f0-9]{40}$/;
 const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/;
 const RELEASE_PATTERN = /^rel_[a-z0-9]{10,64}$/;
 const RUN_ID_PATTERN = /^[1-9][0-9]{0,19}$/;
 const MACHINE_ID_PATTERN = /^[a-f0-9]{14}$/;
+const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const ARGUMENT_NAMES = new Set([
   "status-file",
+  "receipt-file",
+  "config",
   "output",
   "bridge-commit",
   "image-digest",
@@ -48,95 +58,115 @@ function validateInputs({ bridgeCommit, imageDigest, workflowRunId }) {
   );
 }
 
-function validateMachine(machine, expected, machineIds, releaseIds) {
-  requireCondition(isRecord(machine), "Fly Machine is invalid");
-  requireCondition(
-    typeof machine.id === "string" && MACHINE_ID_PATTERN.test(machine.id),
-    "Fly Machine id is invalid"
-  );
-  requireCondition(!machineIds.has(machine.id), "Fly Machine id is duplicated");
-  machineIds.add(machine.id);
+function expectedImage(inputs) {
+  return `registry.fly.io/${APPLICATION}:git-${inputs.bridgeCommit}@${inputs.imageDigest}`;
+}
 
-  requireCondition(machine.state === "started", "Fly Machine is not started");
-  requireCondition(machine.host_status === "ok", "Fly Machine host is not healthy");
-  requireCondition(machine.cordoned === false, "Fly Machine is cordoned");
-
-  const imageRef = machine.image_ref;
-  requireCondition(isRecord(imageRef), "Fly Machine image reference is invalid");
-  requireCondition(imageRef.registry === "registry.fly.io", "Fly Machine registry is invalid");
-  requireCondition(imageRef.repository === APPLICATION, "Fly Machine repository is invalid");
-  requireCondition(imageRef.tag === expected.tag, "Fly Machine commit tag differs");
-  requireCondition(imageRef.digest === expected.imageDigest, "Fly Machine image digest differs");
-  requireCondition(isRecord(imageRef.labels), "Fly Machine image labels are invalid");
+function validateReceipt(receipt, inputs) {
+  requireCondition(isRecord(receipt), "managed fleet receipt is invalid");
   requireCondition(
-    imageRef.labels["org.opencontainers.image.revision"] === expected.bridgeCommit,
-    "Fly Machine image revision differs"
+    JSON.stringify(Object.keys(receipt)) === JSON.stringify([
+      "schemaVersion",
+      "application",
+      "phase",
+      "image",
+      "machineIds",
+      "releaseId",
+      "intervals",
+      "protocolVersion",
+    ]),
+    "managed fleet receipt shape is invalid"
   );
-
-  requireCondition(isRecord(machine.config), "Fly Machine config is invalid");
-  requireCondition(machine.config.image === expected.image, "Fly Machine immutable image differs");
-  const metadata = machine.config.metadata;
-  requireCondition(isRecord(metadata), "Fly Machine metadata is invalid");
-  requireCondition(metadata.fly_process_group === "app", "Fly Machine process group is invalid");
+  requireCondition(receipt.schemaVersion === 1, "managed fleet receipt schema differs");
+  requireCondition(receipt.application === APPLICATION, "managed fleet application differs");
+  requireCondition(receipt.phase === "v6", "managed fleet phase differs");
+  requireCondition(receipt.image === expectedImage(inputs), "managed fleet image differs");
   requireCondition(
-    typeof metadata.fly_release_id === "string" &&
-      RELEASE_PATTERN.test(metadata.fly_release_id),
-    "Fly Machine release id is invalid"
+    Array.isArray(receipt.machineIds) && receipt.machineIds.length === 2,
+    "managed fleet Machine ids are invalid"
   );
-  releaseIds.add(metadata.fly_release_id);
-
-  requireCondition(
-    Array.isArray(machine.checks) && machine.checks.length > 0 && machine.checks.length <= 32,
-    "Fly Machine checks are invalid"
-  );
-  const checkNames = new Set();
-  for (const check of machine.checks) {
+  const machineIds = receipt.machineIds.map((machineId) => {
     requireCondition(
-      isRecord(check) && typeof check.name === "string" && check.name.length > 0,
-      "Fly Machine check is invalid"
+      typeof machineId === "string" && MACHINE_ID_PATTERN.test(machineId),
+      "managed fleet Machine id is invalid"
     );
-    requireCondition(!checkNames.has(check.name), "Fly Machine check is duplicated");
-    checkNames.add(check.name);
-    requireCondition(check.status === "passing", "Fly Machine check is not passing");
-  }
-}
-
-function validateFlyStatus(status, inputs) {
-  validateInputs(inputs);
-  requireCondition(isRecord(status), "Fly status document is invalid");
-  requireCondition(status.Name === APPLICATION, "Fly status application differs");
-  requireCondition(status.Deployed === true, "Fly application is not deployed");
-  requireCondition(status.Status === "deployed", "Fly application status is not deployed");
+    return machineId;
+  });
+  requireCondition(new Set(machineIds).size === 2, "managed fleet Machine ids are duplicated");
   requireCondition(
-    Array.isArray(status.Machines) && status.Machines.length > 0 && status.Machines.length <= 64,
-    "Fly active Machine set is invalid"
+    JSON.stringify(machineIds) === JSON.stringify([...machineIds].sort()),
+    "managed fleet Machine ids are not canonical"
   );
-
-  const expected = {
-    ...inputs,
-    tag: `git-${inputs.bridgeCommit}`,
-    image: `registry.fly.io/${APPLICATION}:git-${inputs.bridgeCommit}@${inputs.imageDigest}`,
-  };
-  const machineIds = new Set();
-  const releaseIds = new Set();
-  for (const machine of status.Machines) {
-    validateMachine(machine, expected, machineIds, releaseIds);
-  }
-  requireCondition(releaseIds.size === 1, "Fly active Machines do not share one release id");
-  return [...releaseIds][0];
+  requireCondition(
+    typeof receipt.releaseId === "string" && RELEASE_PATTERN.test(receipt.releaseId),
+    "managed fleet release id is invalid"
+  );
+  requireCondition(
+    Number.isSafeInteger(receipt.intervals) && receipt.intervals >= 3 && receipt.intervals <= 12,
+    "managed fleet interval count is invalid"
+  );
+  requireCondition(receipt.protocolVersion === "6", "managed fleet writer protocol differs");
+  return Object.freeze({
+    machineIds: Object.freeze(machineIds),
+    releaseId: receipt.releaseId,
+    intervals: receipt.intervals,
+  });
 }
 
-function buildDeploymentAttestation(status, inputs, now = new Date()) {
-  const releaseId = validateFlyStatus(status, inputs);
+function validateFlyStatus(machineList, receipt, desired, inputs) {
+  validateInputs(inputs);
+  const sealed = validateReceipt(receipt, inputs);
+  let current;
+  try {
+    current = validateFleetSnapshot(
+      machineList,
+      desiredStateForPhase(desired, "v6"),
+      expectedImage(inputs)
+    );
+  } catch (error) {
+    fail(typeof error?.message === "string" ? error.message : "Fly fleet is invalid");
+  }
+  requireCondition(
+    JSON.stringify(current.machineIds) === JSON.stringify(sealed.machineIds),
+    "Fly Machine identities differ from the repeatedly attested fleet"
+  );
+  requireCondition(
+    current.releaseId === sealed.releaseId,
+    "Fly release differs from the repeatedly attested fleet"
+  );
+  return Object.freeze({
+    machineIds: current.machineIds,
+    releaseId: current.releaseId,
+    intervals: sealed.intervals,
+  });
+}
+
+function buildDeploymentAttestation(
+  machineList,
+  receipt,
+  desired,
+  inputs,
+  flyConfigSha256,
+  now = new Date()
+) {
+  requireCondition(
+    typeof flyConfigSha256 === "string" && SHA256_PATTERN.test(flyConfigSha256),
+    "Fly configuration digest is invalid"
+  );
+  const verified = validateFlyStatus(machineList, receipt, desired, inputs);
   requireCondition(now instanceof Date && Number.isFinite(now.getTime()), "verification time is invalid");
   return Object.freeze({
-    schemaVersion: 1,
+    schemaVersion: 2,
     bridgeCommit: inputs.bridgeCommit,
     imageDigest: inputs.imageDigest,
     workflowRunId: inputs.workflowRunId,
     workflowId: WORKFLOW_ID,
     application: APPLICATION,
-    releaseId,
+    releaseId: verified.releaseId,
+    machineIds: verified.machineIds,
+    managedIntervals: verified.intervals,
+    writerProtocol: "v6",
+    flyConfigSha256,
     verifiedAt: now.toISOString(),
     status: "deployed-and-smoke-tested",
   });
@@ -158,19 +188,41 @@ function parseArguments(args) {
   return Object.freeze(Object.fromEntries(values));
 }
 
-function readStatus(filename) {
-  let bytes;
+function readStableRegularFile(filename, expectedBasename) {
+  requireCondition(path.basename(filename) === expectedBasename, expectedBasename + " path is invalid");
+  let descriptor = null;
   try {
-    bytes = fs.readFileSync(filename);
-  } catch (_error) {
-    fail("Fly status file could not be read");
+    const noFollow = fs.constants.O_NOFOLLOW || 0;
+    descriptor = fs.openSync(filename, fs.constants.O_RDONLY | noFollow);
+    const opened = fs.fstatSync(descriptor, { bigint: true });
+    const materialized = fs.lstatSync(filename, { bigint: true });
+    requireCondition(
+      opened.isFile() &&
+        materialized.isFile() &&
+        !materialized.isSymbolicLink() &&
+        opened.dev === materialized.dev &&
+        opened.ino === materialized.ino,
+      expectedBasename + " is not a stable regular file"
+    );
+    const bytes = fs.readFileSync(descriptor);
+    requireCondition(
+      bytes.length > 0 && bytes.length <= MAX_DOCUMENT_BYTES && !bytes.includes(0),
+      expectedBasename + " size is invalid"
+    );
+    return bytes;
+  } catch (error) {
+    if (error?.code === "deployment_attestation_invalid") throw error;
+    fail(expectedBasename + " could not be read");
+  } finally {
+    if (descriptor !== null) fs.closeSync(descriptor);
   }
-  requireCondition(bytes.length > 0 && bytes.length <= MAX_STATUS_BYTES, "Fly status file size is invalid");
-  requireCondition(!bytes.includes(0), "Fly status file contains NUL bytes");
+}
+
+function parseJsonDocument(bytes, label) {
   try {
     return JSON.parse(bytes.toString("utf8"));
   } catch (_error) {
-    fail("Fly status file is invalid JSON");
+    fail(label + " is invalid JSON");
   }
 }
 
@@ -192,13 +244,32 @@ function writeAttestation(filename, attestation) {
 
 function main(args = process.argv.slice(2)) {
   const values = parseArguments(args);
+  requireCondition(
+    path.resolve(values.config) === path.resolve("fly.toml"),
+    "Fly configuration path is invalid"
+  );
   const inputs = {
     bridgeCommit: values["bridge-commit"],
     imageDigest: values["image-digest"],
     workflowRunId: values["workflow-run-id"],
   };
-  const status = readStatus(values["status-file"]);
-  const attestation = buildDeploymentAttestation(status, inputs);
+  const machineBytes = readStableRegularFile(values["status-file"], "fly-machine-list.json");
+  const receiptBytes = readStableRegularFile(
+    values["receipt-file"],
+    "managed-fleet-attestation.json"
+  );
+  const configBytes = readStableRegularFile(values.config, "fly.toml");
+  const machineList = parseJsonDocument(machineBytes, "Fly Machine list");
+  const receipt = parseJsonDocument(receiptBytes, "managed fleet receipt");
+  const desired = loadDesiredState(values.config, APPLICATION);
+  const configDigest = createHash("sha256").update(configBytes).digest("hex");
+  const attestation = buildDeploymentAttestation(
+    machineList,
+    receipt,
+    desired,
+    inputs,
+    configDigest
+  );
   writeAttestation(values.output, attestation);
 }
 
@@ -216,5 +287,6 @@ module.exports = {
   buildDeploymentAttestation,
   main,
   validateFlyStatus,
+  validateReceipt,
   WORKFLOW_ID,
 };

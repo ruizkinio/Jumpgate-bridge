@@ -13,6 +13,7 @@ const PACKAGE_VERSION = require("../../package.json").version;
 const execFileAsync = promisify(execFile);
 const IMAGE_PATTERN = /^registry\.fly\.io\/([a-z0-9-]+):git-([a-f0-9]{40})@(sha256:[a-f0-9]{64})$/;
 const MACHINE_ID_PATTERN = /^[a-f0-9]{14}$/;
+const RELEASE_ID_PATTERN = /^rel_[a-z0-9]{10,64}$/;
 const CLAIM_WRITER_ROLLOUT_ENV = "JUMPGATE_REDIS_PLAYBACK_CLAIM_ROLLOUT_MODE";
 const RELEASE_COMMAND = "node scripts/production-release-protocols.js apply-env";
 const PROTOCOL_STATUS_COMMAND = "node scripts/playback-claim-writer-protocol.js status";
@@ -437,14 +438,29 @@ function assertMachineDefinition(machine, desired, expectedImage) {
   assertMachineService(machine, desired);
 }
 
-function validateFleetSample(machines, desired, image) {
+function validateFleetSnapshot(machines, desired, image) {
   const expectedImage = parseImage(image, desired.app);
   const serving = collectServingMachines(machines, desired.processGroup);
+  const releaseIds = new Set();
   for (const machine of serving) {
     assertMachineDefinition(machine, desired, expectedImage);
     assertServiceHealth(machine, desired);
+    const releaseId = machine.config.metadata?.fly_release_id;
+    requireCondition(
+      typeof releaseId === "string" && RELEASE_ID_PATTERN.test(releaseId),
+      "Machine release id is invalid"
+    );
+    releaseIds.add(releaseId);
   }
-  return serving.map((machine) => machine.id);
+  requireCondition(releaseIds.size === 1, "serving Machines do not share one release id");
+  return Object.freeze({
+    machineIds: Object.freeze(serving.map((machine) => machine.id)),
+    releaseId: [...releaseIds][0],
+  });
+}
+
+function validateFleetSample(machines, desired, image) {
+  return [...validateFleetSnapshot(machines, desired, image).machineIds];
 }
 
 function collectConvergenceMachines(machines, expectedProcessGroup) {
@@ -829,19 +845,26 @@ async function attestRepeatedly(options) {
   requireCondition(typeof options.versionProbe === "function", "Machine runtime version probe is required");
   requireCondition(typeof options.sleep === "function", "attestation sleep is required");
   let stableIds = null;
+  let stableReleaseId = null;
   let protocolVersion = null;
   for (let index = 0; index < intervals; index += 1) {
-    const ids = validateFleetSample(
+    const snapshot = validateFleetSnapshot(
       await options.sample(),
       desired,
       options.image
     );
+    const ids = [...snapshot.machineIds];
     if (stableIds === null) {
       stableIds = ids;
+      stableReleaseId = snapshot.releaseId;
     } else {
       requireCondition(
         JSON.stringify(ids) === JSON.stringify(stableIds),
         "serving Machine identities changed during attestation"
+      );
+      requireCondition(
+        snapshot.releaseId === stableReleaseId,
+        "serving Machine release changed during attestation"
       );
     }
     for (const machineId of ids) {
@@ -861,10 +884,38 @@ async function attestRepeatedly(options) {
   }
   return Object.freeze({
     machineIds: stableIds,
+    releaseId: stableReleaseId,
     intervals,
     phase: options.phase,
     protocolVersion,
   });
+}
+
+function writeFleetReceipt(filename, desired, image, result) {
+  requireCondition(
+    path.basename(filename) === "managed-fleet-attestation.json",
+    "managed fleet receipt filename is invalid",
+    "fly_arguments_invalid"
+  );
+  const receipt = Object.freeze({
+    schemaVersion: 1,
+    application: desired.app,
+    phase: result.phase,
+    image,
+    machineIds: result.machineIds,
+    releaseId: result.releaseId,
+    intervals: result.intervals,
+    protocolVersion: result.protocolVersion,
+  });
+  let descriptor;
+  try {
+    descriptor = fs.openSync(filename, "wx", 0o600);
+    fs.writeFileSync(descriptor, JSON.stringify(receipt, null, 2) + "\n", "utf8");
+  } catch (_error) {
+    throw rolloutError("fly_receipt_write_failed", "managed fleet receipt could not be created");
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
 }
 
 function sameMachineIds(machines, expectedIds) {
@@ -1087,6 +1138,8 @@ async function main(args = process.argv.slice(2)) {
     versionProbe: (machineId) => readMachineVersion(flyctl, app, machineId),
     sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
   });
+  const receipt = readArgument(args, "receipt", { optional: true, defaultValue: null });
+  if (receipt !== null) writeFleetReceipt(receipt, desired, image, result);
   process.stdout.write(
     "Managed Fly " + result.phase + " fleet attested across " + result.intervals + " intervals.\n"
   );
@@ -1123,4 +1176,6 @@ module.exports = {
   startMachine,
   validateConvergenceSample,
   validateFleetSample,
+  validateFleetSnapshot,
+  writeFleetReceipt,
 };

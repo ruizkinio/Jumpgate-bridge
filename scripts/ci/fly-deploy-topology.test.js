@@ -1479,6 +1479,7 @@ function validateWorkflow(source) {
     "container-smoke",
   ]);
   assert.equal(deployJob.if, DEPLOY_IF);
+  assert.deepEqual(deployJob.permissions, { contents: "read" });
   assert.deepEqual(deployJob.environment, {
     name: "production",
     url: "https://jumpgate-bridge.fly.dev/configure",
@@ -1494,6 +1495,51 @@ function validateWorkflow(source) {
     expectedJobStep("deploy", ["name", "run"], {
       name: "Install and verify pinned Fly CLI before authentication",
       run: FLYCTL_VERIFY_RUN,
+    }),
+  ]);
+  const provenanceJob = model.jobs["deployment-provenance"];
+  assert.ok(provenanceJob, "deployment-provenance job is required");
+  assert.deepEqual(provenanceJob.keys, [
+    "name",
+    "needs",
+    "if",
+    "runs-on",
+    "timeout-minutes",
+    "permissions",
+    "steps",
+  ]);
+  assert.equal(provenanceJob.name, "Fly deployment provenance / GitHub OIDC");
+  assert.equal(provenanceJob.needs, "deploy");
+  assert.equal(provenanceJob.if, DEPLOY_IF);
+  assert.equal(provenanceJob.runsOn, "ubuntu-latest");
+  assert.equal(provenanceJob.timeoutMinutes, "10");
+  assert.deepEqual(provenanceJob.permissions, {
+    attestations: "write",
+    contents: "read",
+    "id-token": "write",
+  });
+  assert.equal(provenanceJob.env, null);
+  assert.equal(provenanceJob.environment, null);
+  assert.equal(provenanceJob.concurrency, null);
+  assert.equal(provenanceJob.hasContainer, false);
+  assert.equal(provenanceJob.defaults, null);
+  assert.equal(provenanceJob.outputs, null);
+  assert.deepEqual(provenanceJob.steps, [
+    expectedJobStep("deployment-provenance", ["name", "uses", "with"], {
+      name: "Download exact deployment attestation",
+      uses: "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+      with: {
+        name: "jumpgate-deployment-attestation-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}",
+        path: "${{ runner.temp }}/jumpgate-deployment-attestation-${{ github.run_id }}",
+      },
+    }),
+    expectedJobStep("deployment-provenance", ["name", "uses", "with"], {
+      name: "Sign deployment attestation through GitHub OIDC",
+      uses: "actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f",
+      with: {
+        "subject-path":
+          "${{ runner.temp }}/jumpgate-deployment-attestation-${{ github.run_id }}/deployment-attestation.json",
+      },
     }),
   ]);
   const named = steps.filter((step) => step.name === STEP_NAME);

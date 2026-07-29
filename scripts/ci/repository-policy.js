@@ -1139,6 +1139,7 @@ function validatePublicationGate(documents, options = {}) {
     const expectedJobIds = [
       "container-smoke",
       "deploy",
+      "deployment-provenance",
       "fingerprint-parity",
       "postgres-live",
       "quality",
