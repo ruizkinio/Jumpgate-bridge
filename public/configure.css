@@ -1082,6 +1082,25 @@ button:disabled {
   text-transform: uppercase;
 }
 
+.player-version-note {
+  margin: 0;
+  color: #d9f4ff;
+  font-size: 0.82rem;
+}
+
+.player-version-note > span {
+  display: inline-block;
+  margin-right: 0.45rem;
+  padding: 0.18rem 0.42rem;
+  border: 1px solid rgba(80, 210, 255, 0.34);
+  color: var(--accent-bright);
+  font-family: var(--font-meta);
+  font-size: 0.62rem;
+  font-weight: 760;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
 .player-setup-list {
   display: grid;
   gap: 7px;

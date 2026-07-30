@@ -30,6 +30,12 @@ optionally connect Trakt.
 The root manifest is setup-only. Unpaired `/identify` and `/resume` requests fail
 closed instead of sharing a global playback identity.
 
+Current release validation targets official Stremio Android Mobile `2.3.2` and Android
+TV `1.10.4`. Android Mobile `2.1.5` is unsupported because its retained player state can
+hang when the same cached stream is selected after returning from an external player.
+Future Stremio releases require the external-player lifecycle gate in the coordinated
+Jumpgate device UAT before they become a release baseline.
+
 ## Pre-release Hosted Instance
 
 Open:
