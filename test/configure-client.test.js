@@ -1937,11 +1937,17 @@ test("owned production sources contain no Stremio mutation or rollback path", ()
 
 test("install stage preserves Android external-player setup guidance", () => {
   const html = fs.readFileSync(publicPath("configure.html"), "utf8");
+  const css = fs.readFileSync(publicPath("configure.css"), "utf8");
   const guidance = html.match(
     /<div id="installPlaybackGuidance"[^>]*>[\s\S]*?<\/div>/i
   );
 
   assert.ok(guidance, "playback guidance container must remain present");
+  assert.match(guidance[0], /class="player-version-note"/i);
+  assert.match(guidance[0], /Android Mobile <strong>2\.3\.2<\/strong>/i);
+  assert.match(guidance[0], /Android TV <strong>1\.10\.4<\/strong>/i);
+  assert.match(guidance[0], /Mobile 2\.1\.5 has a known replay bug/i);
+  assert.match(css, /\.player-version-note\s*\{/);
   const instructionList = guidance[0].match(
     /<ol class="player-setup-list">([\s\S]*?)<\/ol>/i
   );
