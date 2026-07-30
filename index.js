@@ -2103,7 +2103,8 @@ app.use(
 app.use(globalRateLimiter);
 
 app.use((req, _res, next) => {
-  console.log("[REQ] " + req.method + " " + safeReqUrlForLog(req));
+  const requestTarget = safeReqUrlForLog(req).replace(/\r|\n/g, "");
+  console.log("[REQ] " + req.method + " " + requestTarget);
   next();
 });
 
