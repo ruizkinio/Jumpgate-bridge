@@ -121,6 +121,18 @@ test("checked-in desired state is exact and deployable after live storage attest
   assert.equal(desired.env.JUMPGATE_REDIS_PLAYBACK_WRITE_VERSION, "4");
   assert.equal(desired.env.JUMPGATE_REDIS_PLAYBACK_CLAIM_ROLLOUT_MODE, "v6");
   assert.equal(
+    desired.env.JUMPGATE_PRIVACY_POLICY_URL,
+    "https://github.com/ruizkinio/Jumpgate-bridge/blob/main/PRIVACY.md"
+  );
+  assert.equal(
+    desired.env.JUMPGATE_SECURITY_POLICY_URL,
+    "https://github.com/ruizkinio/Jumpgate-bridge/blob/main/SECURITY.md"
+  );
+  assert.equal(
+    desired.env.JUMPGATE_SUPPORT_POLICY_URL,
+    "https://github.com/ruizkinio/Jumpgate-bridge/blob/main/SUPPORT.md"
+  );
+  assert.equal(
     desired.releaseCommand,
     "node scripts/production-release-protocols.js apply-env"
   );
@@ -362,6 +374,15 @@ test("desired state parsing is bound to one captured fly.toml byte sequence", ()
       /shape/
     );
   }
+
+  const redirectedPolicy = source.replace(
+    "https://github.com/ruizkinio/Jumpgate-bridge/blob/main/PRIVACY.md",
+    "https://example.test/privacy"
+  );
+  assert.throws(
+    () => loadDesiredStateFromBytes(Buffer.from(redirectedPolicy), "jumpgate-bridge"),
+    /differs from checked-in desired state/
+  );
 });
 
 test("phase-specific attestation cannot confuse transition and final v6 fleets", () => {
