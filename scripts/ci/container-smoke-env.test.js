@@ -298,6 +298,18 @@ test("production deployment pins fenced v4 protocols, durable manifests, and two
     fly,
     /JUMPGATE_SUBTITLE_PERMANENT_ERASURE_MODE\s*=\s*'tigris-version-purge-v1'/
   );
+  assert.match(
+    fly,
+    /JUMPGATE_PRIVACY_POLICY_URL\s*=\s*'https:\/\/github\.com\/ruizkinio\/Jumpgate-bridge\/blob\/main\/PRIVACY\.md'/
+  );
+  assert.match(
+    fly,
+    /JUMPGATE_SECURITY_POLICY_URL\s*=\s*'https:\/\/github\.com\/ruizkinio\/Jumpgate-bridge\/blob\/main\/SECURITY\.md'/
+  );
+  assert.match(
+    fly,
+    /JUMPGATE_SUPPORT_POLICY_URL\s*=\s*'https:\/\/github\.com\/ruizkinio\/Jumpgate-bridge\/blob\/main\/SUPPORT\.md'/
+  );
   assert.match(fly, /JUMPGATE_SUBTITLE_S3_BUCKET\s*=\s*'jumpgate-bridge-subtitles-live'/);
   assert.match(fly, /min_machines_running\s*=\s*2/);
   assert.match(
