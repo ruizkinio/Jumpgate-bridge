@@ -977,6 +977,9 @@ async function getTmdbMeta(imdbId, keyOverride, options = {}) {
       poster: item.poster_path
         ? publicArtworkUrl("https://image.tmdb.org/t/p/w342" + item.poster_path)
         : "",
+      background: item.backdrop_path
+        ? publicArtworkUrl("https://image.tmdb.org/t/p/w780" + item.backdrop_path)
+        : "",
       logo,
       ts: Date.now(),
     };
@@ -1216,6 +1219,8 @@ function sanitizeConfiguredStreamDisplay(metadata) {
   }
   const poster = publicArtworkUrl(metadata.poster);
   if (poster) display.poster = poster;
+  const background = publicArtworkUrl(metadata.background);
+  if (background) display.background = background;
   const logo = publicArtworkUrl(metadata.logo);
   if (logo) display.logo = logo;
   return display;
@@ -4255,8 +4260,9 @@ async function configuredMetaHandler(req, res) {
       ok: true,
       imdb,
       name: tmdb ? tmdb.name : imdb,
-       poster: publicArtworkUrl(tmdb && tmdb.poster),
-       logo: publicArtworkUrl(tmdb && tmdb.logo),
+      poster: publicArtworkUrl(tmdb && tmdb.poster),
+      background: publicArtworkUrl(tmdb && tmdb.background),
+      logo: publicArtworkUrl(tmdb && tmdb.logo),
     });
   } catch (_err) {
     res.status(503).json({ ok: false, error: "metadata_unavailable" });
