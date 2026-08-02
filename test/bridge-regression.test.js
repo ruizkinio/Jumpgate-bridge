@@ -557,6 +557,25 @@ test("version is synchronized across runtime and manifests", async () => {
   }
 });
 
+test("all Trakt API requests use one stable Bridge user agent", () => {
+  const headers = app.traktApiHeadersForTest();
+  assert.deepEqual(Object.keys(headers).sort(), [
+    "Accept",
+    "User-Agent",
+    "trakt-api-key",
+    "trakt-api-version",
+  ]);
+  assert.equal(headers.Accept, "application/json");
+  assert.equal(headers["User-Agent"], `Jumpgate-Bridge/${require("../package.json").version}`);
+  assert.equal(headers["trakt-api-version"], "2");
+  assert.equal(typeof headers["trakt-api-key"], "string");
+  assert.ok(headers["trakt-api-key"].length > 0);
+  assert.equal(
+    app.traktApiHeadersForTest({ "Content-Type": "application/json" })["User-Agent"],
+    headers["User-Agent"]
+  );
+});
+
 test("Trakt authorize overrides are loopback-only in tests and ignored in production", () => {
   const probe = [
     'const { resolveTraktAuthorizeUrl } = require("./lib/trakt-authorize-url");',
@@ -2097,6 +2116,97 @@ test("slotted OAuth cookies support reversed callbacks and exact profile isolati
   });
   assert.equal(firstStatus.body.traktLinked, true);
   assert.equal(secondStatus.body.traktLinked, true);
+});
+
+test("OAuth exchange failures expose a truthful recovery message and only bounded diagnostics", async () => {
+  const privateValues = [
+    "private-authorization-code",
+    "private-upstream-diagnostic",
+    "private-profile-reference",
+  ];
+  const device = await pairDevice(await generateConfig("OAuth Exchange Failure"));
+  const flow = await beginManagementTraktConnect(device);
+  const messages = [];
+  const originalError = console.error;
+  console.error = (...args) => messages.push(args.join(" "));
+  app.setTraktAuthCodeExchangeForTest(async () => {
+    const error = new Error(privateValues[1]);
+    error.code = "trakt_exchange_invalid_grant";
+    error.traktStatus = 400;
+    error.profile = privateValues[2];
+    throw error;
+  });
+  try {
+    const callback = await request(
+      `/auth/trakt/callback?code=${privateValues[0]}&state=${encodeURIComponent(flow.state)}`,
+      { headers: { cookie: flow.bindingCookie }, redirect: "manual" }
+    );
+    assert.equal(callback.response.status, 303);
+    const destination = new URL(callback.response.headers.get("location"), "https://jumpgate.test");
+    assert.equal(destination.pathname, "/configure");
+    assert.equal(
+      destination.searchParams.get("error"),
+      "Trakt rejected the authorization response. Start again; if this repeats, the Bridge Trakt callback settings need attention."
+    );
+    assert.deepEqual(messages, [
+      "[trakt:oauth] callback failed stage=token_exchange category=invalid_grant status=400",
+    ]);
+    const publicOutput = callback.response.headers.get("location") + "\n" + messages.join("\n");
+    for (const value of privateValues) assert.equal(publicOutput.includes(value), false);
+    assert.equal(publicOutput.includes(flow.state), false);
+    assert.equal(publicOutput.includes(flow.bindingCookie), false);
+  } finally {
+    app.setTraktAuthCodeExchangeForTest(null);
+    console.error = originalError;
+  }
+});
+
+test("OAuth credential-write failures do not masquerade as expired state or disclose tokens", async () => {
+  const accessToken = "private-write-failure-access";
+  const refreshToken = "private-write-failure-refresh";
+  const storageDiagnostic = "private-storage-diagnostic";
+  const device = await pairDevice(await generateConfig("OAuth Credential Write Failure"));
+  const flow = await beginManagementTraktConnect(device);
+  const repositorySet = await app.repositoriesForTest();
+  const originalPut = repositorySet.oauthCredentials.put;
+  const originalError = console.error;
+  const messages = [];
+  repositorySet.oauthCredentials.put = async (...args) => {
+    const credentials = args[2];
+    if (credentials && credentials.access_token === accessToken) {
+      throw new Error(storageDiagnostic);
+    }
+    return originalPut.apply(repositorySet.oauthCredentials, args);
+  };
+  console.error = (...args) => messages.push(args.join(" "));
+  app.setTraktAuthCodeExchangeForTest(async () => ({
+    access_token: accessToken,
+    refresh_token: refreshToken,
+    token_expiry: Math.floor(Date.now() / 1000) + 3600,
+  }));
+  try {
+    const callback = await request(
+      `/auth/trakt/callback?code=write-failure&state=${encodeURIComponent(flow.state)}`,
+      { headers: { cookie: flow.bindingCookie }, redirect: "manual" }
+    );
+    assert.equal(callback.response.status, 303);
+    const destination = new URL(callback.response.headers.get("location"), "https://jumpgate.test");
+    assert.equal(
+      destination.searchParams.get("error"),
+      "Trakt authorized, but Jumpgate could not save the connection. Start again."
+    );
+    assert.deepEqual(messages, [
+      "[trakt:oauth] callback failed stage=credential_write category=credential_write",
+    ]);
+    const publicOutput = callback.response.headers.get("location") + "\n" + messages.join("\n");
+    for (const value of [accessToken, refreshToken, storageDiagnostic, flow.state]) {
+      assert.equal(publicOutput.includes(value), false);
+    }
+  } finally {
+    app.setTraktAuthCodeExchangeForTest(null);
+    console.error = originalError;
+    repositorySet.oauthCredentials.put = originalPut;
+  }
 });
 
 test("OAuth callback rejects a wrong binding and clears only the selected slot", async () => {

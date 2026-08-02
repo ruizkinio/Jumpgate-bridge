@@ -110,6 +110,7 @@ const TRAKT_SCROBBLE_BASE_URL =
   process.env.NODE_ENV === "test" && process.env.JUMPGATE_TEST_TRAKT_SCROBBLE_BASE_URL
     ? process.env.JUMPGATE_TEST_TRAKT_SCROBBLE_BASE_URL.replace(/\/+$/, "")
     : "https://api.trakt.tv/scrobble";
+const TRAKT_USER_AGENT = `Jumpgate-Bridge/${BRIDGE_VERSION}`;
 const TRAKT_EXPIRY_SKEW_SEC = 60;
 const TRAKT_PROVIDER = "trakt";
 const TRAKT_REFRESH_WAIT_TIMEOUT_MS =
@@ -1405,6 +1406,78 @@ function tokenUnavailableError() {
   return error;
 }
 
+function traktApiHeaders(additional = {}) {
+  return {
+    Accept: "application/json",
+    "User-Agent": TRAKT_USER_AGENT,
+    "trakt-api-version": "2",
+    "trakt-api-key": TRAKT_CLIENT_ID,
+    ...additional,
+  };
+}
+
+function traktExchangeError(category, status) {
+  const allowed = new Set([
+    "invalid_client",
+    "invalid_grant",
+    "oauth_rejected",
+    "response_invalid",
+    "transport",
+    "upstream_rejected",
+  ]);
+  const boundedCategory = allowed.has(category) ? category : "upstream_rejected";
+  const error = new Error("Trakt authorization exchange failed");
+  error.code = "trakt_exchange_" + boundedCategory;
+  if (Number.isInteger(status) && status >= 100 && status <= 599) {
+    error.traktStatus = status;
+  }
+  return error;
+}
+
+function traktCallbackError(category) {
+  const error = new Error("Trakt callback rejected");
+  error.code = "trakt_callback_" + category;
+  return error;
+}
+
+function managementTraktCallbackFailure(stage, error) {
+  const code = error && typeof error.code === "string" ? error.code : "";
+  let category = "service_unavailable";
+  let message = "Trakt connection is temporarily unavailable. Try again shortly.";
+
+  if (code === "trakt_callback_authorization_denied") {
+    category = "authorization_denied";
+    message = "Trakt authorization was cancelled. Start again when you are ready.";
+  } else if (code === "trakt_callback_state_invalid") {
+    category = "state_invalid";
+    message = "Trakt connection state expired or was lost. Start again from this paired profile.";
+  } else if (code === "trakt_callback_profile_changed" || code === "trakt_generation_changed") {
+    category = "profile_changed";
+    message = "This Jumpgate profile changed while Trakt was connecting. Start again.";
+  } else if (code === "trakt_exchange_invalid_client") {
+    category = "invalid_client";
+    message = "The Bridge Trakt application is not configured correctly. Contact the deployment owner.";
+  } else if (code === "trakt_exchange_invalid_grant") {
+    category = "invalid_grant";
+    message = "Trakt rejected the authorization response. Start again; if this repeats, the Bridge Trakt callback settings need attention.";
+  } else if (code.startsWith("trakt_exchange_")) {
+    category = code.slice("trakt_exchange_".length);
+    message = "Trakt could not complete the connection. Try again shortly.";
+  } else if (stage === "credential_write") {
+    category = "credential_write";
+    message = "Trakt authorized, but Jumpgate could not save the connection. Start again.";
+  }
+
+  const status =
+    error && Number.isInteger(error.traktStatus) && error.traktStatus >= 100 && error.traktStatus <= 599
+      ? " status=" + error.traktStatus
+      : "";
+  if (!["authorization_denied", "profile_changed", "state_invalid"].includes(category)) {
+    console.error("[trakt:oauth] callback failed stage=" + stage + " category=" + category + status);
+  }
+  return message;
+}
+
 async function failClosedTraktCredential(repository, profileId, record, expectedAttemptId) {
   let current = record;
   for (let attempt = 0; attempt < REPOSITORY_WRITE_ATTEMPTS; attempt += 1) {
@@ -1564,21 +1637,33 @@ async function exchangeTraktAuthCode(code, redirectUri) {
     grant_type: "authorization_code",
   };
 
-  const res = await fetch(TRAKT_TOKEN_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "application/json",
-      "trakt-api-version": "2",
-      "trakt-api-key": TRAKT_CLIENT_ID,
-    },
-    body: JSON.stringify(payload),
-    timeout: 10000,
-  });
+  let res;
+  try {
+    res = await fetch(TRAKT_TOKEN_URL, {
+      method: "POST",
+      headers: traktApiHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(payload),
+      timeout: 10000,
+    });
+  } catch (_error) {
+    throw traktExchangeError("transport");
+  }
 
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok || !body.access_token) {
-    throw new Error("Trakt auth exchange failed");
+  let body = null;
+  try {
+    body = await res.json();
+  } catch (_error) {
+    throw traktExchangeError("response_invalid", res.status);
+  }
+  if (!res.ok) {
+    const oauthError = body && typeof body.error === "string" ? body.error : "";
+    if (oauthError === "invalid_client") throw traktExchangeError("invalid_client", res.status);
+    if (oauthError === "invalid_grant") throw traktExchangeError("invalid_grant", res.status);
+    if (oauthError) throw traktExchangeError("oauth_rejected", res.status);
+    throw traktExchangeError("upstream_rejected", res.status);
+  }
+  if (!body || typeof body.access_token !== "string" || !body.access_token) {
+    throw traktExchangeError("response_invalid", res.status);
   }
 
   const createdAt = Number(body.created_at) || Math.floor(Date.now() / 1000);
@@ -1604,12 +1689,7 @@ async function refreshTraktToken(refreshToken) {
 
   const res = await fetch(TRAKT_TOKEN_URL, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "application/json",
-      "trakt-api-version": "2",
-      "trakt-api-key": TRAKT_CLIENT_ID,
-    },
+    headers: traktApiHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(payload),
     timeout: 10000,
   });
@@ -1642,13 +1722,10 @@ async function dispatchTraktScrobble(request) {
   try {
     response = await fetch(TRAKT_SCROBBLE_BASE_URL + "/" + request.action, {
       method: "POST",
-      headers: {
-        Accept: "application/json",
+      headers: traktApiHeaders({
         Authorization: "Bearer " + request.accessToken,
         "Content-Type": "application/json",
-        "trakt-api-version": "2",
-        "trakt-api-key": TRAKT_CLIENT_ID,
-      },
+      }),
       body: JSON.stringify(request.payload),
       timeout: 10000,
       size: 64 * 1024,
@@ -1935,6 +2012,7 @@ if (process.env.NODE_ENV === "test") {
     }
     testTraktAuthCodeExchange = exchange;
   };
+  app.traktApiHeadersForTest = traktApiHeaders;
   app.setTraktRefreshForTest = (refresh) => {
     if (refresh !== null && typeof refresh !== "function") {
       throw new TypeError("test Trakt refresh must be a function");
@@ -3932,6 +4010,7 @@ async function handleManagementTraktCallback(
   code,
   oauthError
 ) {
+  let stage = "state_consume";
   const cookieName =
     protocol === MANAGEMENT_TRAKT_AJAX_PROTOCOL
       ? MANAGEMENT_OAUTH_BINDING_COOKIE
@@ -3954,8 +4033,9 @@ async function handleManagementTraktCallback(
   try {
     const consumed = await repositories().oauthStates.consume(stateToken, bindingToken);
     if (!consumed || !consumed.payload || consumed.payload.kind !== "management-trakt-connect") {
-      throw traktFenceError();
+      throw traktCallbackError("state_invalid");
     }
+    stage = "state_validate";
     if (
       (protocol === MANAGEMENT_TRAKT_FORM_PROTOCOL &&
         consumed.payload.protocol !== MANAGEMENT_TRAKT_FORM_PROTOCOL) ||
@@ -3963,7 +4043,7 @@ async function handleManagementTraktCallback(
         consumed.payload.protocol !== undefined &&
         consumed.payload.protocol !== MANAGEMENT_TRAKT_AJAX_PROTOCOL)
     ) {
-      throw traktFenceError();
+      throw traktCallbackError("state_invalid");
     }
     const generation = consumed.payload.credentialGeneration;
     const revision = consumed.payload.credentialRevision;
@@ -3972,9 +4052,11 @@ async function handleManagementTraktCallback(
       !Number.isSafeInteger(revision) ||
       revision < 1
     ) {
-      throw traktFenceError();
+      throw traktCallbackError("state_invalid");
     }
-    if (oauthError || !code) throw new Error("Trakt authorization was not completed");
+    stage = "authorization";
+    if (oauthError || !code) throw traktCallbackError("authorization_denied");
+    stage = "profile_fence";
     const profile = await repositories().profiles.getById(consumed.profileId);
     const current = await repositories().oauthCredentials.get(consumed.profileId, TRAKT_PROVIDER);
     if (
@@ -3984,9 +4066,11 @@ async function handleManagementTraktCallback(
       current.revision !== revision ||
       readTraktGeneration(current.credentials) !== generation
     ) {
-      throw traktFenceError();
+      throw traktCallbackError("profile_changed");
     }
+    stage = "token_exchange";
     const tokens = await exchangeTraktAuthCode(code, getTraktRedirectUri(req));
+    stage = "credential_write";
     await replaceTraktCredential(consumed.profileId, tokens, {
       expectedGeneration: generation,
       expectedRevision: revision,
@@ -3996,10 +4080,10 @@ async function handleManagementTraktCallback(
       "notice",
       "Trakt connected. Pairing remains profile-scoped."
     );
-  } catch (_error) {
+  } catch (error) {
     return rejectManagementTraktLaunch(
       res,
-      "Trakt connection expired or the profile changed. Start again."
+      managementTraktCallbackFailure(stage, error)
     );
   }
 }

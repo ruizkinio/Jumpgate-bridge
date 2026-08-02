@@ -1002,6 +1002,8 @@ durableTest(
         if (req.url.startsWith("/scrobble/")) {
           scrobbleRequests.push({
             authorization: req.headers.authorization || "",
+            userAgent: req.headers["user-agent"] || "",
+            traktApiKey: req.headers["trakt-api-key"] || "",
             payload,
             url: req.url,
           });
@@ -1009,7 +1011,11 @@ durableTest(
           res.setHeader("content-type", "application/json");
           return res.end(JSON.stringify({ action: "scrobble" }));
         }
-        refreshRequests.push(payload);
+        refreshRequests.push({
+          ...payload,
+          userAgent: req.headers["user-agent"] || "",
+          traktApiKey: req.headers["trakt-api-key"] || "",
+        });
         if (payload.refresh_token === "failing-refresh-secret") {
           res.statusCode = 400;
           res.setHeader("content-type", "application/json");
@@ -1105,10 +1111,20 @@ durableTest(
     );
     assert.equal(refreshRequests.length, 1);
     assert.equal(refreshRequests[0].refresh_token, "expired-refresh-secret");
+    assert.equal(refreshRequests[0].userAgent, "Jumpgate-Bridge/3.0.0");
+    assert.equal(refreshRequests[0].traktApiKey, TRAKT_CLIENT_ID);
     assert.equal(scrobbleRequests.length, 2);
     assert.equal(
       scrobbleRequests.every(
         (request) => request.authorization === "Bearer rotated-access-token"
+      ),
+      true
+    );
+    assert.equal(
+      scrobbleRequests.every(
+        (request) =>
+          request.userAgent === "Jumpgate-Bridge/3.0.0" &&
+          request.traktApiKey === TRAKT_CLIENT_ID
       ),
       true
     );
