@@ -250,9 +250,9 @@ test("real Chromium proves configured referrer privacy and the AJAX m1/form m2 T
     input.dispatchEvent(new Event("input", { bubbles: true }));
   });
 
-  await page.locator('label[for="skipTraktAcknowledge"]').click();
-  await page.locator("#skipTraktBtn").click();
+  await page.locator("#createProfileBtn").click();
   await page.waitForFunction(() => Boolean(document.getElementById("configBlob").value));
+  assert.equal(await page.locator("#connectTraktBtn").isDisabled(), true);
   const configuredCapability = await page.locator("#configBlob").inputValue();
   assert.match(configuredCapability, /^[A-Za-z0-9_-]{40,}$/);
 
@@ -274,7 +274,7 @@ test("real Chromium proves configured referrer privacy and the AJAX m1/form m2 T
     });
     await formPage.addInitScript(installNativeFormProbe, {
       binding: PROBE_BINDING,
-      buttonId: "reconnectTraktBtn",
+      buttonId: "connectTraktBtn",
       connectPath: CONNECT_PATH,
     });
 
@@ -304,7 +304,7 @@ test("real Chromium proves configured referrer privacy and the AJAX m1/form m2 T
       await formPage.locator("#pairBtn").click();
       await formPage.waitForFunction(() => {
         const panel = document.getElementById("profileManagement");
-        const button = document.getElementById("reconnectTraktBtn");
+        const button = document.getElementById("connectTraktBtn");
         return panel && !panel.classList.contains("hidden") && button && !button.disabled;
       });
       const authorizationRequest = formPage.waitForRequest((request) => {
@@ -312,7 +312,7 @@ test("real Chromium proves configured referrer privacy and the AJAX m1/form m2 T
         return target.origin === authorizationOrigin && target.pathname === TRAKT_AUTHORIZE_PATH;
       }, { timeout: 10000 });
       await formPage.evaluate(() => {
-        const button = document.getElementById("reconnectTraktBtn");
+        const button = document.getElementById("connectTraktBtn");
         button.click();
         button.click();
       });
