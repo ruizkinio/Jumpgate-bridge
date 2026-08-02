@@ -1053,6 +1053,7 @@ test("TMDB metadata returns only valid release and first-air years", async () =>
       title: "Release Year",
       release_date: "1999-03-31",
       poster_path: "/release-year.jpg",
+      backdrop_path: "/release-year-backdrop.jpg",
     }),
   });
   const series = await app.getTmdbMetaForTest("tt9000002", tmdbKey, {
@@ -1072,6 +1073,10 @@ test("TMDB metadata returns only valid release and first-air years", async () =>
   });
 
   assert.equal(movie.year, 1999);
+  assert.equal(
+    movie.background,
+    "https://image.tmdb.org/t/p/w780/release-year-backdrop.jpg"
+  );
   assert.equal(series.year, 2016);
   assert.equal(invalid.year, null);
 });
@@ -1094,6 +1099,7 @@ test("configured streams carry approved TMDB display metadata without Trakt", as
       name: "The Matrix",
       year: 1999,
       poster: "https://image.tmdb.org/t/p/w342/matrix.jpg",
+      background: "https://image.tmdb.org/t/p/w780/matrix-backdrop.jpg",
       logo: "https://image.tmdb.org/t/p/w185/matrix-logo.png",
       canonicalIdentity: { provider: "tmdb", id: "unsafe-display-identity" },
       traktEligible: false,
@@ -1129,6 +1135,7 @@ test("configured streams carry approved TMDB display metadata without Trakt", as
     title: "The Matrix",
     year: 1999,
     poster: "https://image.tmdb.org/t/p/w342/matrix.jpg",
+    background: "https://image.tmdb.org/t/p/w780/matrix-backdrop.jpg",
     logo: "https://image.tmdb.org/t/p/w185/matrix-logo.png",
   });
 });
@@ -1143,7 +1150,7 @@ test("configured stream display drops unsafe TMDB artwork and unrelated fields",
     year: 1995,
     poster: "https://image.tmdb.org.evil.example/poster.jpg",
     logo: "https://image.tmdb.org@evil.example/logo.png",
-    background: "https://image.tmdb.org/t/p/w780/ignored-background.jpg",
+    background: "https://image.tmdb.org:444/t/p/w780/ignored-background.jpg",
     authorization: "Bearer must-not-cross",
   }));
 
