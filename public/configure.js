@@ -872,7 +872,15 @@
         : profileTraktLinked === false
         ? "Trakt disconnected"
         : "Connection status unavailable";
-      byId("reconnectTraktBtn").textContent = profileTraktLinked === true ? "Reconnect Trakt" : "Connect Trakt";
+      const connectButton = byId("connectTraktBtn");
+      connectButton.setAttribute(
+        "aria-label",
+        profileTraktLinked === true
+          ? "Reconnect account with Trakt to refresh scrobbles and watched history sync"
+          : "Connect account with Trakt to sync scrobbles and watched history"
+      );
+      byId("connectTraktLabel").textContent =
+        profileTraktLinked === true ? "Reconnect account" : "Connect account";
       refreshManagementActionAvailability();
     }
 
@@ -1182,10 +1190,6 @@
       if (activeProviderOperation === operation) activeProviderOperation = null;
       refreshSteps();
       return true;
-    }
-
-    function toggleSkipTrakt() {
-      byId("skipTraktBtn").disabled = !byId("skipTraktAcknowledge").checked;
     }
 
     async function copyText(value) {
@@ -1508,8 +1512,6 @@
       }
       byId("name").value = "";
       byId("subtitlesEnabled").checked = false;
-      byId("skipTraktAcknowledge").checked = false;
-      toggleSkipTrakt();
       byId("meta").textContent = "";
       byId("pairTimer").textContent = "";
       byId("providerList").replaceChildren();
@@ -1689,10 +1691,6 @@
     });
 
     async function generateConfigured() {
-      if (!byId("skipTraktAcknowledge").checked) {
-        browser.alert("Use Connect Trakt + Generate, or explicitly acknowledge skipping Trakt.");
-        return;
-      }
       const response = await browser.fetch("/configure/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2077,9 +2075,8 @@
     byId("pairCode").addEventListener("input", () => {
       byId("pairCode").value = formatUserCode(byId("pairCode").value);
     });
+    byId("createProfileBtn").addEventListener("click", () => void generateConfigured().catch((error) => browser.alert(error.message)));
     byId("connectTraktBtn").addEventListener("click", () => void connectTrakt());
-    byId("skipTraktAcknowledge").addEventListener("change", toggleSkipTrakt);
-    byId("skipTraktBtn").addEventListener("click", () => void generateConfigured().catch((error) => browser.alert(error.message)));
     byId("pairBtn").addEventListener("click", () => void pairJumpgate());
     byId("connectStremioBtn").addEventListener("click", () => void connectStremio());
     byId("cancelStremioBtn").addEventListener("click", cancelStremio);
@@ -2095,7 +2092,6 @@
     byId("installConfiguredBtn").addEventListener("click", installConfigured);
     byId("refreshDevicesBtn").addEventListener("click", () => void refreshProfileManagement());
     byId("clearHistoryBtn").addEventListener("click", () => void clearBridgeHistory());
-    byId("reconnectTraktBtn").addEventListener("click", () => void connectTrakt());
     byId("disconnectTraktBtn").addEventListener("click", () => void disconnectManagedTrakt());
     byId("openDeleteProfileBtn").addEventListener("click", openDeleteProfileDialog);
     byId("cancelDeleteProfileBtn").addEventListener("click", closeDeleteProfileDialog);

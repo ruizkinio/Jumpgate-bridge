@@ -33,11 +33,11 @@
       <ol class="steps" aria-label="Configuration progress">
         <li id="stepGenerate" class="@@JUMPGATE_GENERATE_STEP_CLASS@@">
           <span class="step-index">01</span>
-          <span class="step-copy"><strong>Profile</strong><small>Trakt and playback preferences</small></span>
+          <span class="step-copy"><strong>Profile</strong><small>Playback preferences</small></span>
         </li>
         <li id="stepPair" class="locked">
           <span class="step-index">02</span>
-          <span class="step-copy"><strong>Pair</strong><small>Bind this Jumpgate device</small></span>
+          <span class="step-copy"><strong>Pair</strong><small>Bind device, then optional Trakt</small></span>
         </li>
         <li id="stepProviders" class="locked">
           <span class="step-index">03</span>
@@ -84,7 +84,7 @@
 
         <div class="notice-row" role="note">
           <span class="notice-icon" aria-hidden="true">i</span>
-          <p>Installation remains locked until Jumpgate is paired and provider import succeeds.</p>
+          <p>Create the private profile, then pair Jumpgate. Optional Trakt connects only after pairing.</p>
         </div>
 
         <div class="field-grid">
@@ -122,23 +122,9 @@
         </details>
 
         <div class="primary-action-row">
-          <button id="connectTraktBtn" class="a trakt-action" type="button" aria-label="Connect account with Trakt to sync scrobbles and watched history">
-            <span class="trakt-brand-panel" aria-hidden="true">
-              <img class="trakt-lockup" src="/assets/trakt-lockup-negative.svg" alt="">
-            </span>
-            <span class="trakt-action-copy" aria-hidden="true">
-              <strong>Connect account</strong>
-              <small>Scrobbles + history</small>
-            </span>
-            <span class="trakt-arrow" aria-hidden="true"></span>
+          <button id="createProfileBtn" class="a" type="button" aria-label="Create private Jumpgate playback profile">
+            <span><strong>Create profile</strong><small>Pair to unlock Trakt and providers</small></span>
           </button>
-        </div>
-        <div class="alternate-path">
-          <label class="consent" for="skipTraktAcknowledge">
-            <input id="skipTraktAcknowledge" type="checkbox">
-            <span>Continue without Trakt history sync</span>
-          </label>
-          <button id="skipTraktBtn" class="b compact" type="button" disabled>Generate without Trakt</button>
         </div>
 
         <div id="result" class="result hidden">
@@ -278,10 +264,17 @@
                 <h4 id="traktManagementHeading">Trakt connection</h4>
                 <p>Disconnecting Trakt does not delete history already stored by Trakt.</p>
                 <p id="traktManagementState" class="management-state">Connection status unavailable</p>
-                <div class="actions compact-actions">
-                  <button id="reconnectTraktBtn" class="b compact" type="button" data-management-action>Connect Trakt</button>
-                  <button id="disconnectTraktBtn" class="b compact" type="button" data-management-action>Disconnect Trakt</button>
-                </div>
+                <button id="connectTraktBtn" class="a trakt-action" type="button" data-management-action aria-label="Connect account with Trakt to sync scrobbles and watched history" disabled>
+                  <span class="trakt-brand-panel" aria-hidden="true">
+                    <img class="trakt-lockup" src="/assets/trakt-lockup-negative.svg" alt="">
+                  </span>
+                  <span class="trakt-action-copy" aria-hidden="true">
+                    <strong id="connectTraktLabel">Connect account</strong>
+                    <small>Scrobbles + history</small>
+                  </span>
+                  <span class="trakt-arrow" aria-hidden="true"></span>
+                </button>
+                <button id="disconnectTraktBtn" class="b compact" type="button" data-management-action disabled>Disconnect Trakt</button>
               </section>
             </div>
 

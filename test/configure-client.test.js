@@ -1790,13 +1790,37 @@ test("profile management UI requires confirmations, disables pending actions, an
   assert.match(configureSource, /privateBridgeBaseUrl = "";[\s\S]*?privateInstallUrl = "";[\s\S]*?privateManifestUrl = "";/);
   assert.match(configureSource, /managementCsrf = "";[\s\S]*?profileManagementApi = null/);
   assert.match(configureSource, /bootstrap = \{\};[\s\S]*?bootstrapElement\.textContent = "\{\}"/);
-  assert.match(configureSource, /byId\("skipTraktAcknowledge"\)\.checked = false/);
+  assert.doesNotMatch(configureSource, /skipTraktAcknowledge|skipTraktBtn/);
   assert.match(configureSource, /setHidden\(byId\("result"\), true\)/);
   assert.match(configureSource, /refreshSteps\(\);[\s\S]*?byId\("name"\)\.focus\(\)/);
   assert.doesNotMatch(configureSource, /console\s*\./);
 });
 
-for (const buttonId of ["connectTraktBtn", "reconnectTraktBtn"]) {
+test("profile creation precedes optional Trakt and does not open OAuth before pairing", async () => {
+  let generatedRequest = null;
+  const harness = createRaceHarness(({ url, method, request }) => {
+    if (url !== "/configure/generate" || method !== "POST") return undefined;
+    generatedRequest = JSON.parse(request.body);
+    return jsonResponse(200, {
+      config: "generated-config",
+      name: "Living Room",
+      traktLinked: false,
+    });
+  });
+
+  assert.equal(harness.elements.get("connectTraktBtn").disabled, true);
+  harness.elements.get("createProfileBtn").dispatch("click");
+  await waitFor(() => Boolean(generatedRequest), "profile generation did not start");
+
+  assert.equal(generatedRequest.name, "");
+  assert.equal(harness.submittedForms.length, 0);
+  assert.deepEqual(harness.redirects, []);
+  assert.deepEqual(harness.alerts, []);
+  assert.equal(harness.elements.get("pairStatus").textContent, "Pair Jumpgate, then connect Stremio providers.");
+  assert.equal(harness.elements.get("connectTraktBtn").disabled, true);
+});
+
+for (const buttonId of ["connectTraktBtn"]) {
   test(`${buttonId} synchronously submits one fixed Trakt POST with the current CSRF`, async () => {
     const harness = createRaceHarness();
     await harness.pair();
@@ -1822,8 +1846,7 @@ for (const buttonId of ["connectTraktBtn", "reconnectTraktBtn"]) {
     assert.deepEqual(harness.redirects, []);
 
     harness.elements.get(buttonId).dispatch("click");
-    harness.elements.get(buttonId === "connectTraktBtn" ? "reconnectTraktBtn" : "connectTraktBtn")
-      .dispatch("click");
+    harness.elements.get(buttonId).dispatch("click");
     assert.equal(harness.submittedForms.length, 1);
     assert.equal(harness.fetchCalls.length, fetchCount);
     assert.deepEqual(harness.redirects, []);
@@ -1854,7 +1877,7 @@ for (const [name, protocol] of [
     );
 
     harness.elements.get("connectTraktBtn").dispatch("click");
-    harness.elements.get("reconnectTraktBtn").dispatch("click");
+    harness.elements.get("connectTraktBtn").dispatch("click");
     await waitFor(() => Boolean(connectRequest), "cached-client Trakt request did not start");
     assert.equal(
       harness.fetchCalls.filter((value) => value === "POST /api/profile/trakt/connect").length,
@@ -2010,15 +2033,17 @@ test("safe-flow UI is pair-gated, accessible, read-only, and profile-specific", 
   assert.doesNotMatch(html, /id="pairTimer"[^>]*(?:role|aria-live)=/);
   assert.doesNotMatch(html, /id="stremioTimer"[^>]*(?:role|aria-live)=/);
   assert.match(html, /id="stremioQr"[^>]*alt="[^"]+"/);
+  assert.match(html, /id="createProfileBtn"[^>]*aria-label="Create private Jumpgate playback profile"/);
+  assert.doesNotMatch(html, /skipTraktAcknowledge|skipTraktBtn|Generate without Trakt/);
   assert.match(
     html,
-    /id="connectTraktBtn"[^>]*aria-label="Connect account with Trakt to sync scrobbles and watched history"/
+    /id="profileManagement"[^>]*hidden[\s\S]*?id="connectTraktBtn"[^>]*data-management-action[^>]*aria-label="Connect account with Trakt to sync scrobbles and watched history"[^>]*disabled/
   );
   assert.match(
     html,
     /class="trakt-brand-panel"[^>]*aria-hidden="true"[\s\S]*?class="trakt-lockup"[^>]*alt=""/
   );
-  assert.match(html, /class="trakt-action-copy"[^>]*aria-hidden="true"[\s\S]*?<strong>Connect account<\/strong>/);
+  assert.match(html, /class="trakt-action-copy"[^>]*aria-hidden="true"[\s\S]*?<strong[^>]*>Connect account<\/strong>/);
   assert.doesNotMatch(html, /trakt-action-main|trakt-connect/);
   assert.match(css, /:focus-visible/);
   assert.match(css, /@media \(max-width:/);
