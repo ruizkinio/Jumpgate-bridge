@@ -28,7 +28,7 @@ env:
   NODE_VERSION: "24"
   # Advance these only after the matching Kodi commit has been reviewed and pushed.
   KODI_REPOSITORY: ruizkinio/Jumpgate-kodi
-  KODI_SHA: 06228da12a066944772fa9951652a620b6e0b95c
+  KODI_SHA: 265808c7c43695da6e54608f23beb5af0d87a85e
   ACTIONLINT_VERSION: "1.7.9"
   ACTIONLINT_LINUX_AMD64_SHA256: 233b280d05e100837f4af1433c7b40a5dcb306e3aa68fb4f17f8a7f45a7df7b4
   SHELLCHECK_VERSION: "0.11.0"
@@ -266,7 +266,7 @@ jobs:
       - name: Validate pinned Kodi source
         run: |
           test "$KODI_REPOSITORY" = "ruizkinio/Jumpgate-kodi"
-          test "$KODI_SHA" = "06228da12a066944772fa9951652a620b6e0b95c"
+          test "$KODI_SHA" = "265808c7c43695da6e54608f23beb5af0d87a85e"
       - name: Check out exact Kodi commit
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:

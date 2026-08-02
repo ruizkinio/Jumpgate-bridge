@@ -27,7 +27,7 @@ const VERSION_PARITY_INVOCATION =
   "node scripts/ci/verify-kodi-version-parity.js .ci/kodi/xbmc/platform/android/activity/XBMCApp.h";
 const KODI_PIN_VALIDATION_RUN =
   'test "$KODI_REPOSITORY" = "ruizkinio/Jumpgate-kodi"\n' +
-  'test "$KODI_SHA" = "06228da12a066944772fa9951652a620b6e0b95c"\n';
+  'test "$KODI_SHA" = "265808c7c43695da6e54608f23beb5af0d87a85e"\n';
 const FINGERPRINT_PARITY_RUN =
   'test "$(git -C .ci/kodi rev-parse HEAD)" = "$KODI_SHA"\n' +
   'test -f "$JUMPGATE_KODI_FINGERPRINT_FIXTURE"\n' +
@@ -90,7 +90,7 @@ const IMAGES = Object.freeze({
 const WORKFLOW_ENV = Object.freeze({
   NODE_VERSION: "24",
   KODI_REPOSITORY: "ruizkinio/Jumpgate-kodi",
-  KODI_SHA: "06228da12a066944772fa9951652a620b6e0b95c",
+  KODI_SHA: "265808c7c43695da6e54608f23beb5af0d87a85e",
   ACTIONLINT_VERSION: "1.7.9",
   ACTIONLINT_LINUX_AMD64_SHA256:
     "233b280d05e100837f4af1433c7b40a5dcb306e3aa68fb4f17f8a7f45a7df7b4",
