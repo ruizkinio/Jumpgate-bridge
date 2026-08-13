@@ -6,7 +6,7 @@ const { fingerprintStream, hashOpaqueValue } = require("../lib/source-context");
 
 const ORIGIN = "https://jumpgate-uat.fly.dev";
 const CONTENT_ID = "jumpgate-uat-vobsub-v1";
-const MEDIA_SHA256 = "1c5877c241b9d6aec20c309e77f919478afb6648855dae2e5bbe67906bcf7303";
+const MEDIA_SHA256 = "f976676998f0bd96fbec35daf20aaa128ff3fc82c68af5177867841b79b4060b";
 const PARTS = Object.freeze([
   Object.freeze({
     extension: ".idx",
@@ -149,7 +149,7 @@ async function run() {
 
     phase = "media";
     const media = Buffer.from(await (await response(new URL(playable.url).pathname)).arrayBuffer());
-    assert.equal(media.length, 2930299);
+    assert.equal(media.length, 3722302);
     assert.equal(sha256(media), MEDIA_SHA256);
 
     phase = "claim";

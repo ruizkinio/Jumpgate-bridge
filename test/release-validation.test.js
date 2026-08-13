@@ -392,11 +392,11 @@ test("synthetic activation seeds one exact provider and exposes only private fix
   const mediaPath = `/_c/${config}/uat-vobsub/media/jumpgate-uat-vobsub-v1.mp4`;
   const mediaHead = await request(mediaPath, { method: "HEAD" });
   assert.equal(mediaHead.response.status, 200);
-  assert.equal(mediaHead.response.headers.get("content-length"), "2930299");
+  assert.equal(mediaHead.response.headers.get("content-length"), "3722302");
   assert.equal(mediaHead.response.headers.get("accept-ranges"), "bytes");
   const mediaRange = await request(mediaPath, { headers: { range: "bytes=0-31" } });
   assert.equal(mediaRange.response.status, 206);
-  assert.equal(mediaRange.response.headers.get("content-range"), "bytes 0-31/2930299");
+  assert.equal(mediaRange.response.headers.get("content-range"), "bytes 0-31/3722302");
   assert.equal(Buffer.byteLength(mediaRange.body), 32);
   const archive = await request(
     `/_c/${config}/uat-vobsub/subtitles/jumpgate-uat-vobsub-v1.zip`

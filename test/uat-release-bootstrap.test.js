@@ -352,8 +352,9 @@ test("pinned Fly UAT deployment uses only the guarded bootstrap and isolated ide
   assert.doesNotMatch(dockerfile, /COPY[^\n]*scripts/);
   assert.match(dockerfile, /COPY --chown=node:node uat-fixtures \.\/uat-fixtures/);
   assert.doesNotMatch(productionDockerfile, /uat-fixtures/);
+  const normalizedUatDockerfile = dockerfile.replace(/\r\n/g, "\n");
   assert.equal(
-    dockerfile.replace("COPY --chown=node:node uat-fixtures ./uat-fixtures\n", "").replace(/\r\n/g, "\n"),
+    normalizedUatDockerfile.replace("COPY --chown=node:node uat-fixtures ./uat-fixtures\n", ""),
     productionDockerfile.replace(/\r\n/g, "\n")
   );
 });
