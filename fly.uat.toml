@@ -2,6 +2,7 @@ app = 'jumpgate-uat'
 primary_region = 'iad'
 
 [build]
+  dockerfile = 'Dockerfile.uat'
 
 [deploy]
   release_command = 'node scripts/uat-release-bootstrap.js apply-env'
@@ -9,6 +10,7 @@ primary_region = 'iad'
 [env]
   NODE_ENV = 'uat'
   JUMPGATE_UAT_MODE = '1'
+  JUMPGATE_UAT_VOBSUB_FIXTURE = '1'
   HOST = '0.0.0.0'
   PUBLIC_BASE_URL = 'https://jumpgate-uat.fly.dev'
   JUMPGATE_PRIVACY_POLICY_URL = 'https://github.com/ruizkinio/Jumpgate-bridge/blob/main/PRIVACY.md'

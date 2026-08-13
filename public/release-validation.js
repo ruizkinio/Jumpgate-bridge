@@ -5,6 +5,10 @@
   const pairCode = document.getElementById("pairCode");
   const button = document.getElementById("activateBtn");
   const status = document.getElementById("status");
+  const installControls = document.getElementById("installControls");
+  const installAddon = document.getElementById("installAddon");
+  const copyManifest = document.getElementById("copyManifest");
+  let activatedManifestUrl = "";
 
   function compact(value) {
     return String(value || "").toUpperCase().replace(/[\s-]/g, "");
@@ -66,7 +70,13 @@
       const body = await response.json();
       if (!response.ok || body.ok !== true) throw new Error(body.error || "Activation failed");
       sessionStorage.removeItem(storageKey);
-      status.textContent = "Activated. Return to Jumpgate and observe the selected scenario.";
+      if (typeof body.manifestUrl !== "string" || typeof body.installUrl !== "string") {
+        throw new Error("Activation response did not contain install controls");
+      }
+      activatedManifestUrl = body.manifestUrl;
+      installAddon.href = body.installUrl;
+      installControls.hidden = false;
+      status.textContent = "Activated and fixture provider applied. Install the synthetic addon, then return to Jumpgate.";
     } catch (error) {
       status.textContent = error && error.message ? error.message : "Activation failed";
     } finally {
@@ -75,4 +85,13 @@
   }
 
   button.addEventListener("click", activate);
+  copyManifest.addEventListener("click", async function () {
+    if (!activatedManifestUrl) return;
+    try {
+      await navigator.clipboard.writeText(activatedManifestUrl);
+      status.textContent = "Synthetic manifest URL copied.";
+    } catch (_error) {
+      status.textContent = "Copy failed. Use the install control on this device.";
+    }
+  });
 })();

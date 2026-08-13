@@ -6,7 +6,7 @@ const net = require("node:net");
 const path = require("node:path");
 const zlib = require("zlib");
 const { version: BRIDGE_VERSION } = require("./package.json");
-const CONFIGURE_ASSET_REVISION = `${BRIDGE_VERSION}-r14`;
+const CONFIGURE_ASSET_REVISION = `${BRIDGE_VERSION}-r15`;
 const { PairingCoordinator } = require("./lib/pairing-coordinator");
 const { ClaimBoundHistoryService } = require("./lib/claim-bound-history-service");
 const { ProfileLifecycleService } = require("./lib/profile-lifecycle-service");
@@ -49,6 +49,7 @@ const {
   loadReleaseValidationConfig,
   waitForRequest,
 } = require("./lib/release-validation");
+const UAT_VOBSUB_FIXTURE = require("./lib/uat-vobsub-fixture");
 const { HistoryService, projectCanonicalIdentity } = require("./lib/history-service");
 const { assertCanonicalUuid } = require("./lib/history-protocol");
 const {
@@ -71,6 +72,9 @@ const {
 const { isProductionLikeEnvironment } = require("./lib/runtime-environment");
 
 const RELEASE_VALIDATION = loadReleaseValidationConfig(process.env);
+const UAT_VOBSUB_ASSETS = RELEASE_VALIDATION.vobsubFixtureEnabled
+  ? UAT_VOBSUB_FIXTURE.loadAssets()
+  : null;
 
 if (!process.env.CONFIG_SECRET) {
   if (process.env.NODE_ENV === "production" || RELEASE_VALIDATION.enabled) {
@@ -1901,7 +1905,7 @@ function isSyntheticReleaseValidationConfig(config) {
       trakt.token_expiry === 0 &&
       config.settings &&
       config.settings.subtitle_languages === "en" &&
-      config.settings.subtitles_enabled === false &&
+      config.settings.subtitles_enabled === RELEASE_VALIDATION.vobsubFixtureEnabled &&
       config.settings.trakt_enabled === false &&
       config.settings.bridge_url === ""
   );
@@ -1919,7 +1923,7 @@ function renderReleaseValidationPage(req, res, pairCode) {
       trakt: {},
       settings: {
         subtitle_languages: "en",
-        subtitles_enabled: false,
+        subtitles_enabled: RELEASE_VALIDATION.vobsubFixtureEnabled,
         trakt_enabled: false,
         bridge_url: "",
       },
@@ -2018,7 +2022,7 @@ app.use((req, res, next) => {
   setBaselineSecurityHeaders(res, process.env.NODE_ENV);
   if (isPublicAddonPath(req.path)) {
     setPublicAddonCors(res);
-    if (req.method === "OPTIONS") return res.sendStatus(204);
+    if (req.method === "OPTIONS" && !RELEASE_VALIDATION.enabled) return res.sendStatus(204);
   }
   next();
 });
@@ -2267,11 +2271,46 @@ if (RELEASE_VALIDATION.enabled) {
       ["POST /pair/activate", true],
     ]);
     const key = req.method + " " + req.path;
-    if (exact.has(key) || (req.method === "GET" && /^\/(?:assets|p)\//.test(req.path))) {
+    const fixtureConfiguredRoute =
+      RELEASE_VALIDATION.vobsubFixtureEnabled &&
+      (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") &&
+      (/^\/_c\/[A-Za-z0-9_-]{16,4096}\/(?:manifest\.json|stream\/movie\/jumpgate-uat-vobsub-v1\.json|subtitles\/movie\/jumpgate-uat-vobsub-v1(?:\/filename(?:=|%3D)jumpgate-uat-vobsub-v1\.mp4)?\.json)$/i.test(req.path) ||
+        /^\/_c\/[A-Za-z0-9_-]{16,4096}\/uat-vobsub\/(?:manifest\.json|stream\/movie\/jumpgate-uat-vobsub-v1\.json|subtitles\/movie\/jumpgate-uat-vobsub-v1(?:\/filename(?:=|%3D)jumpgate-uat-vobsub-v1\.mp4)?\.json|media\/jumpgate-uat-vobsub-v1\.mp4|subtitles\/jumpgate-uat-vobsub-v1\.zip)$/i.test(req.path));
+    const fixtureCatalogRoute =
+      RELEASE_VALIDATION.vobsubFixtureEnabled &&
+      (req.method === "GET" || req.method === "OPTIONS") &&
+      /^\/_c\/[A-Za-z0-9_-]{16,4096}\/catalog\/movie\/jumpgate-uat-vobsub\.json$/.test(req.path);
+    const fixtureDeviceRoute =
+      RELEASE_VALIDATION.vobsubFixtureEnabled &&
+      ((req.method === "POST" && [
+        "/v1/playback/claim",
+        "/v1/playback/release",
+        "/v1/subtitles/discover",
+        "/v1/subtitles/resolve",
+        "/v1/history/events",
+      ].includes(req.path)) ||
+        ((req.method === "GET" || req.method === "HEAD") &&
+          /^\/v1\/subtitles\/[A-Za-z0-9_-]{8,128}\/[A-Za-z0-9_-]{8,256}\/[12]\/[a-f0-9]{64}\.(?:idx|sub)$/.test(req.path)));
+    const fixtureManagementRoute =
+      RELEASE_VALIDATION.vobsubFixtureEnabled &&
+      req.method === "DELETE" &&
+      req.path === "/api/profile";
+    if (
+      exact.has(key) ||
+      fixtureConfiguredRoute ||
+      fixtureCatalogRoute ||
+      fixtureDeviceRoute ||
+      fixtureManagementRoute ||
+      (req.method === "GET" && /^\/(?:assets|p)\//.test(req.path))
+    ) {
       return next();
     }
     res.setHeader("Cache-Control", "no-store");
     return res.status(404).json({ ok: false, error: "not_found" });
+  });
+  app.use((req, res, next) => {
+    if (req.method === "OPTIONS" && isPublicAddonPath(req.path)) return res.sendStatus(204);
+    next();
   });
 }
 
@@ -3068,6 +3107,44 @@ const storageCleanupRunner = createStorageCleanupRunner({
   },
 });
 
+async function ensureSyntheticUatProvider(profileId, configBlob, publicBaseUrl) {
+  if (!RELEASE_VALIDATION.vobsubFixtureEnabled) return null;
+  const visible = await providerImportService.list(profileId);
+  if (visible.revision === 0 && visible.providers.length === 0) {
+    try {
+      return await providerImportService.import(profileId, {
+        expectedRevision: 0,
+        descriptors: [UAT_VOBSUB_FIXTURE.descriptor(publicBaseUrl, configBlob)],
+      });
+    } catch (error) {
+      if (!isRevisionConflict(error)) throw error;
+    }
+  }
+  return assertSyntheticUatProvider(profileId, configBlob, publicBaseUrl);
+}
+
+async function assertSyntheticUatProvider(profileId, configBlob, publicBaseUrl) {
+  if (!RELEASE_VALIDATION.vobsubFixtureEnabled) return null;
+  const visible = await providerImportService.list(profileId);
+  const stored = await repositories().providers.list(profileId);
+  if (
+    visible.revision === 1 &&
+    visible.providers.length === 1 &&
+    stored.revision === 1 &&
+    stored.providers.length === 1 &&
+    UAT_VOBSUB_FIXTURE.isExactDescriptor(
+      stored.providers[0].descriptor,
+      publicBaseUrl,
+      configBlob
+    )
+  ) {
+    return visible;
+  }
+  const error = new Error("synthetic UAT provider collection is not exact");
+  error.code = "synthetic_provider_collection_invalid";
+  throw error;
+}
+
 function runStorageCleanup() {
   return storageCleanupRunner.run();
 }
@@ -3416,6 +3493,7 @@ app.post(
         return res.status(410).json({ ok: false, error: "Pair code expired" });
       }
       await getOrSeedTraktCredential(activated.profileId, decryptConfig(configBlob));
+      await ensureSyntheticUatProvider(activated.profileId, configBlob, getPublicBaseUrl(req));
       const management = activated.management;
       if (!management) throw new Error("pairing activation did not issue management authority");
       const cookie = serializeCookie(MANAGEMENT_SESSION_COOKIE, management.sessionToken, {
@@ -3495,24 +3573,34 @@ app.post(
         if (!(await waitForRequest(req, res, delayMs))) return;
       }
       let disclosed = false;
-      const result = await pairingCoordinator.redeem(deviceCode, (redeemed) => {
-        disclosed = true;
-        res.setHeader("Cache-Control", "no-store");
-        res.json({
-          ok: true,
-          paired: true,
-          profile_id: redeemed.profileId,
-          profileId: redeemed.profileId,
-          bridgeBaseUrl: redeemed.bridgeBaseUrl,
-          config: redeemed.config,
-          device_id: redeemed.deviceId,
-          deviceId: redeemed.deviceId,
-          device_token: redeemed.deviceToken,
-          deviceToken: redeemed.deviceToken,
-          name: redeemed.name || "",
-          settings: redeemed.settings,
-        });
-      });
+      const result = await pairingCoordinator.redeem(
+        deviceCode,
+        (redeemed) => {
+          disclosed = true;
+          res.setHeader("Cache-Control", "no-store");
+          res.json({
+            ok: true,
+            paired: true,
+            profile_id: redeemed.profileId,
+            profileId: redeemed.profileId,
+            bridgeBaseUrl: redeemed.bridgeBaseUrl,
+            config: redeemed.config,
+            device_id: redeemed.deviceId,
+            deviceId: redeemed.deviceId,
+            device_token: redeemed.deviceToken,
+            deviceToken: redeemed.deviceToken,
+            name: redeemed.name || "",
+            settings: redeemed.settings,
+          });
+        },
+        RELEASE_VALIDATION.vobsubFixtureEnabled
+          ? (redeemed) => assertSyntheticUatProvider(
+              redeemed.profileId,
+              redeemed.configBlob,
+              new URL(redeemed.bridgeBaseUrl).origin
+            )
+          : undefined
+      );
       if (!result || result.status === "not_found") {
         return res.status(404).json({ ok: false, error: "Invalid device code" });
       }
@@ -4324,6 +4412,20 @@ async function configuredManifestHandler(req, res) {
   const profileName = config.name ? " (" + config.name + ")" : "";
   const capabilities = await providerGatewayService.capabilities(req.profileId);
   const types = Array.from(new Set(["movie", "series", ...capabilities.types]));
+  const catalogs = [
+    { type: "movie", id: CONTINUE_CATALOG_ID, name: "Continue Watching" },
+    { type: "series", id: CONTINUE_CATALOG_ID, name: "Continue Watching" },
+  ];
+  if (
+    RELEASE_VALIDATION.vobsubFixtureEnabled &&
+    isSyntheticReleaseValidationConfig(config)
+  ) {
+    catalogs.unshift({
+      type: "movie",
+      id: UAT_VOBSUB_FIXTURE.CATALOG_ID,
+      name: "Jumpgate VobSub Pipeline Test",
+    });
+  }
   res.json({
     id: ADDON_ID,
     version: BRIDGE_VERSION,
@@ -4332,14 +4434,54 @@ async function configuredManifestHandler(req, res) {
       ? "Private Stremio-to-Kodi handoff for " + config.name + ", with provider gatewaying, subtitles, and optional Trakt sync."
       : "Private Stremio-to-Kodi handoff with provider gatewaying, subtitles, and optional Trakt sync.",
     ...manifestArtwork(req),
-    catalogs: [
-      { type: "movie", id: CONTINUE_CATALOG_ID, name: "Continue Watching" },
-      { type: "series", id: CONTINUE_CATALOG_ID, name: "Continue Watching" },
-    ],
+    catalogs,
     resources: [...capabilities.resources, "catalog"],
     types,
     behaviorHints: { configurable: true, configurationRequired: false },
   });
+}
+
+function requireSyntheticUatFixture(req, res, next) {
+  if (
+    !RELEASE_VALIDATION.vobsubFixtureEnabled ||
+    !UAT_VOBSUB_ASSETS ||
+    !isSyntheticReleaseValidationConfig(req.userConfig)
+  ) {
+    return res.status(404).json({ ok: false, error: "not_found" });
+  }
+  next();
+}
+
+function sendUatFixtureManifest(_req, res) {
+  res.setHeader("Cache-Control", "private, no-store");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.json(UAT_VOBSUB_FIXTURE.manifest());
+}
+
+function sendUatFixtureStream(req, res) {
+  res.setHeader("Cache-Control", "private, no-store");
+  res.json(UAT_VOBSUB_FIXTURE.streamResponse(getPublicBaseUrl(req), req.params.config));
+}
+
+function sendUatFixtureSubtitles(req, res) {
+  if (
+    req.params.extra !== undefined &&
+    req.params.extra !== "filename=jumpgate-uat-vobsub-v1.mp4"
+  ) {
+    return res.status(404).json({ ok: false, error: "not_found" });
+  }
+  res.setHeader("Cache-Control", "private, no-store");
+  res.json(UAT_VOBSUB_FIXTURE.subtitlesResponse(getPublicBaseUrl(req), req.params.config));
+}
+
+function sendUatFixtureMedia(req, res) {
+  return UAT_VOBSUB_FIXTURE.sendAsset(req, res, UAT_VOBSUB_ASSETS.media, {
+    allowRange: true,
+  });
+}
+
+function sendUatFixtureSubtitleArchive(req, res) {
+  return UAT_VOBSUB_FIXTURE.sendAsset(req, res, UAT_VOBSUB_ASSETS.subtitles);
 }
 
 function rawGatewayRequestFromUrl(req, expectedResource) {
@@ -4367,6 +4509,13 @@ function rawGatewayRequestFromUrl(req, expectedResource) {
       throw new ProviderGatewayError("invalid_resource_path", "gateway resource path is invalid");
     }
     rawExtra = rawExtra.slice(0, -5);
+    if (
+      RELEASE_VALIDATION.vobsubFixtureEnabled &&
+      expectedResource === "subtitles" &&
+      rawExtra.toLowerCase() === "filename%3djumpgate-uat-vobsub-v1.mp4"
+    ) {
+      rawExtra = "filename=jumpgate-uat-vobsub-v1.mp4";
+    }
   }
   return decodeResourceRequest(expectedResource, type, id, rawExtra);
 }
@@ -4463,6 +4612,18 @@ async function configuredCatalogHandler(req, res) {
   res.json({ metas });
 }
 
+function configuredUatCatalogHandler(req, res) {
+  if (
+    !RELEASE_VALIDATION.vobsubFixtureEnabled ||
+    !isSyntheticReleaseValidationConfig(req.userConfig) ||
+    req.params.type !== "movie"
+  ) {
+    return res.status(404).json({ ok: false, error: "not_found" });
+  }
+  res.setHeader("Cache-Control", "private, no-store");
+  return res.json(UAT_VOBSUB_FIXTURE.catalogResponse(getPublicBaseUrl(req)));
+}
+
 function setConfiguredCatalogPrivacyHeaders(_req, res, next) {
   res.setHeader("Cache-Control", "no-store");
   res.setHeader("Pragma", "no-cache");
@@ -4524,6 +4685,54 @@ async function configuredConfigureHandler(req, res) {
 
 app.get("/_c/:config/manifest.json", asyncHandler(configMiddleware), asyncHandler(configuredManifestHandler));
 app.get(
+  "/_c/:config/uat-vobsub/manifest.json",
+  asyncHandler(configMiddleware),
+  requireSyntheticUatFixture,
+  sendUatFixtureManifest
+);
+app.get(
+  "/_c/:config/uat-vobsub/stream/movie/" + UAT_VOBSUB_FIXTURE.CONTENT_ID + ".json",
+  asyncHandler(configMiddleware),
+  requireSyntheticUatFixture,
+  sendUatFixtureStream
+);
+app.get(
+  "/_c/:config/uat-vobsub/subtitles/movie/" + UAT_VOBSUB_FIXTURE.CONTENT_ID + ".json",
+  asyncHandler(configMiddleware),
+  requireSyntheticUatFixture,
+  sendUatFixtureSubtitles
+);
+app.get(
+  "/_c/:config/uat-vobsub/subtitles/movie/" + UAT_VOBSUB_FIXTURE.CONTENT_ID + "/:extra.json",
+  asyncHandler(configMiddleware),
+  requireSyntheticUatFixture,
+  sendUatFixtureSubtitles
+);
+app.head(
+  "/_c/:config/uat-vobsub/media/" + UAT_VOBSUB_FIXTURE.CONTENT_ID + ".mp4",
+  asyncHandler(configMiddleware),
+  requireSyntheticUatFixture,
+  sendUatFixtureMedia
+);
+app.get(
+  "/_c/:config/uat-vobsub/media/" + UAT_VOBSUB_FIXTURE.CONTENT_ID + ".mp4",
+  asyncHandler(configMiddleware),
+  requireSyntheticUatFixture,
+  sendUatFixtureMedia
+);
+app.head(
+  "/_c/:config/uat-vobsub/subtitles/" + UAT_VOBSUB_FIXTURE.CONTENT_ID + ".zip",
+  asyncHandler(configMiddleware),
+  requireSyntheticUatFixture,
+  sendUatFixtureSubtitleArchive
+);
+app.get(
+  "/_c/:config/uat-vobsub/subtitles/" + UAT_VOBSUB_FIXTURE.CONTENT_ID + ".zip",
+  asyncHandler(configMiddleware),
+  requireSyntheticUatFixture,
+  sendUatFixtureSubtitleArchive
+);
+app.get(
   "/_c/:config/stream/:type/:id/:extra.json",
   asyncHandler(configMiddleware),
   asyncHandler(configuredStreamHandler)
@@ -4544,6 +4753,12 @@ app.get(
   setConfiguredCatalogPrivacyHeaders,
   asyncHandler(configMiddleware),
   asyncHandler(configuredCatalogHandler)
+);
+app.get(
+  "/_c/:config/catalog/:type/" + UAT_VOBSUB_FIXTURE.CATALOG_ID + ".json",
+  setConfiguredCatalogPrivacyHeaders,
+  asyncHandler(configMiddleware),
+  configuredUatCatalogHandler
 );
 app.get("/_c/:config/identify", (_req, res) => sendLegacyIdentityGone(res));
 app.get("/_c/:config/meta/:imdb", asyncHandler(configMiddleware), configuredMetaHandler);

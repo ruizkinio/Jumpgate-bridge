@@ -1,2 +1,6 @@
 node_modules/
 .env
+.uat-fixture-work/
+scripts/uat-vobsub-author/subtitleedit-src/
+scripts/uat-vobsub-author/bin/
+scripts/uat-vobsub-author/obj/
