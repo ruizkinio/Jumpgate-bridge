@@ -491,6 +491,18 @@ test("release Redis preflight accepts only the adjacent read-only protocol bound
   assert.equal(assertRedisReleaseProtocolCompatibility(v5, "initialize-v5"), v5);
   assert.equal(assertRedisReleaseProtocolCompatibility(v5, "advance-v6"), v5);
   assert.equal(assertRedisReleaseProtocolCompatibility(v6, "advance-v6"), v6);
+  assert.equal(
+    assertRedisReleaseProtocolCompatibility(missing, "initialize-or-advance-v6"),
+    missing
+  );
+  assert.equal(
+    assertRedisReleaseProtocolCompatibility(v5, "initialize-or-advance-v6"),
+    v5
+  );
+  assert.equal(
+    assertRedisReleaseProtocolCompatibility(v6, "initialize-or-advance-v6"),
+    v6
+  );
 
   for (const [status, action] of [
     [v6, "initialize-v5"],
@@ -790,6 +802,18 @@ test("production readiness exposes the precise Tigris permanent-erasure blocker"
       error.code === "subtitle_permanent_erasure_unverifiable" &&
       error.message ===
         "production subtitle erasure requires tigris-version-purge-v1 live provider attestation"
+  );
+});
+
+test("UAT enforces production subtitle erasure and composition hardening", async () => {
+  const config = productionConfig({ NODE_ENV: "uat" });
+  assert.throws(
+    () => assertProductionSubtitleErasureReadiness(config),
+    (error) => error.code === "subtitle_permanent_erasure_unverifiable"
+  );
+  await assert.rejects(
+    createStorageRuntime(config, { subtitleS3Client: new FakeSubtitleS3Client() }),
+    /production subtitle storage does not allow injected clients/
   );
 });
 
@@ -2933,6 +2957,34 @@ test("production Redis startup fails closed on unverified server versions", asyn
     assert.equal(redisClient.listenerCount("error"), 0);
     assert.equal(pool.listenerCount("error"), 0);
   }
+});
+
+test("UAT Redis startup verifies the server version and no-eviction policy", async () => {
+  const unsupportedPool = new FakePool();
+  const unsupportedRedis = new FakeRedisClient({
+    serverInfo: "# Server\r\nredis_version:6.2.19\r\n",
+  });
+  await assert.rejects(
+    createStorageRuntimeImpl(productionConfig({ NODE_ENV: "uat" }), {
+      attestProviderMutationMode: async () => {},
+      createPostgresPool: () => unsupportedPool,
+      createRedisClient: () => unsupportedRedis,
+      runPostgresMigrations: async () => ({ applied: [], alreadyApplied: [], verified: [] }),
+    }),
+    (error) => error.code === "redis_version_unsupported"
+  );
+
+  const evictionPool = new FakePool();
+  const evictionRedis = new FakeRedisClient({ maxmemoryPolicy: "allkeys-lru" });
+  await assert.rejects(
+    createStorageRuntimeImpl(productionConfig({ NODE_ENV: "uat" }), {
+      attestProviderMutationMode: async () => {},
+      createPostgresPool: () => evictionPool,
+      createRedisClient: () => evictionRedis,
+      runPostgresMigrations: async () => ({ applied: [], alreadyApplied: [], verified: [] }),
+    }),
+    (error) => error.code === "redis_eviction_policy"
+  );
 });
 
 test("Redis readiness rejects replicas and read-only primaries with startup cleanup", async () => {

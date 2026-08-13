@@ -1728,6 +1728,16 @@ test("playback defaults safely to v3 and initializes one high-entropy generation
   assert.notEqual(calls[0].args[0], calls[1].args[0]);
 });
 
+test("production-like playback writers require the shared Redis rollout protocol", () => {
+  const repository = new RedisPlaybackContextRepository({
+    client: fakeClient(),
+    scriptRunner: new FakeScripts(1000),
+    envelopeCrypto: envelopeCrypto(),
+    productionLikeRuntime: true,
+  });
+  assert.equal(repository._claimWriterProtocolRequirement, "required");
+});
+
 test("playback preserves the exact c801f38 v3 fixture and v4 readers fail closed", async () => {
   const scripts = new FakeScripts(1000);
   const envelopes = envelopeCrypto();

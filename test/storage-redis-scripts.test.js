@@ -94,6 +94,10 @@ test("script definitions have Redis SHA1 digests and preserve atomic contract ma
   );
   assert.match(SCRIPT_DEFINITIONS.pairingIssue.source, /"state", "expired"/);
   assert.match(SCRIPT_DEFINITIONS.pairingIssue.source, /"LIMIT", 0, tonumber\(ARGV\[9\]\)/);
+  assert.match(SCRIPT_DEFINITIONS.pairingIssue.source, /ARGV\[10\] ~= ""/);
+  assert.match(SCRIPT_DEFINITIONS.pairingIssue.source, /"validationScenario", ARGV\[10\]/);
+  assert.match(SCRIPT_DEFINITIONS.pairingValidation.source, /validationRateLimitClaimed/);
+  assert.match(SCRIPT_DEFINITIONS.pairingValidation.source, /redis\.call\("TIME"\)/);
   assert.match(SCRIPT_DEFINITIONS.oauthConsumePeek.source, /"ready"/);
   assert.match(SCRIPT_DEFINITIONS.oauthConsumePeek.source, /payloadEnvelope/);
   assert.match(SCRIPT_DEFINITIONS.oauthConsume.source, /bindingHash/);

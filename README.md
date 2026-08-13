@@ -36,6 +36,23 @@ hang when the same cached stream is selected after returning from an external pl
 Future Stremio releases require the external-player lifecycle gate in the coordinated
 Jumpgate device UAT before they become a release baseline.
 
+### Maintainer Release Validation
+
+Fault scenarios run only on the isolated `https://jumpgate-uat.fly.dev` deployment.
+That deployment uses `NODE_ENV=uat` with `JUMPGATE_UAT_MODE=1`, production-equivalent
+HTTPS and storage hardening, and separate PostgreSQL, Redis, subtitle storage, and
+security material. It refuses Trakt, TMDB, and provider credentials and exposes only
+health, synthetic pairing, version, and static configuration-page routes. Production
+refuses UAT mode, and production release-protocol commands remain production-only.
+
+The reviewed UAT deployment is pinned in `fly.uat.toml`. Its release command is a
+separate UAT-only bootstrap that requires the exact UAT mode and origin, applies the
+pinned PostgreSQL migrations, activates fenced provider mutations, and initializes
+then advances the Redis playback-writer protocol to v6. It is idempotent after that
+state is reached and refuses production. The UAT app must use isolated PostgreSQL,
+Redis, subtitle storage, and generated security material; never attach production
+resources or configure Trakt, TMDB, Stremio, debrid, or provider credentials.
+
 ## Pre-release Hosted Instance
 
 Open:
@@ -333,10 +350,10 @@ sequence-bound privacy replays. That isolated proof does not
 replace live Tigris attestation.
 
 The project requires Node 24 LTS. npm dependency install scripts are denied unless
-explicitly approved in `package.json`; only the pinned `better-sqlite3` build is
-allowed. Package publish lifecycle scripts are forbidden so policy inspection and a
-real script-disabled `npm pack` produce the same artifact. The package is private and
-its pack allowlist contains runtime files only.
+explicitly approved in `package.json`; the pinned `better-sqlite3` release ships its
+platform prebuilds without an install hook. Package publish lifecycle scripts are
+forbidden so policy inspection and a real script-disabled `npm pack` produce the same
+artifact. The package is private and its pack allowlist contains runtime files only.
 
 ## License
 

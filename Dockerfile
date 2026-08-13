@@ -28,7 +28,9 @@ RUN mkdir -p /app/scripts \
     && ln -s ../lib/storage/redis/playback-claim-writer-protocol.js \
       /app/scripts/playback-claim-writer-protocol.js \
     && ln -s ../lib/storage/production-release-protocols.js \
-      /app/scripts/production-release-protocols.js
+      /app/scripts/production-release-protocols.js \
+    && ln -s ../lib/storage/uat-release-bootstrap.js \
+      /app/scripts/uat-release-bootstrap.js
 
 RUN mkdir -p /app/.data && chown node:node /app/.data
 

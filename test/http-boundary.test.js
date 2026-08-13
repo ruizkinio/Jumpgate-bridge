@@ -31,6 +31,11 @@ test("proxy trust defaults closed and is explicit in production", () => {
     () => resolveTrustProxy({ NODE_ENV: "production" }),
     /JUMPGATE_TRUST_PROXY is required/
   );
+  assert.throws(
+    () => resolveTrustProxy({ NODE_ENV: "uat" }),
+    /JUMPGATE_TRUST_PROXY is required/
+  );
+  assert.equal(resolveTrustProxy({ NODE_ENV: "uat", JUMPGATE_TRUST_PROXY: "1" }), 1);
   for (const value of ["true", "-1", "17", "loopback", "1,2"]) {
     assert.throws(
       () => resolveTrustProxy({ NODE_ENV: "production", JUMPGATE_TRUST_PROXY: value }),
@@ -70,13 +75,13 @@ test("CORS classification includes only public Stremio manifest and resource pat
 
 test("HTTP boundary headers are deterministic and HSTS is production-only", () => {
   const development = headerRecorder();
-  setBaselineSecurityHeaders(development.response, false);
+  setBaselineSecurityHeaders(development.response, "development");
   assert.equal(development.headers.get("x-content-type-options"), "nosniff");
   assert.equal(development.headers.get("x-frame-options"), "DENY");
   assert.equal(development.headers.has("strict-transport-security"), false);
 
   const production = headerRecorder();
-  setBaselineSecurityHeaders(production.response, true);
+  setBaselineSecurityHeaders(production.response, "production");
   setPublicAddonCors(production.response);
   assert.equal(
     production.headers.get("strict-transport-security"),
@@ -85,4 +90,11 @@ test("HTTP boundary headers are deterministic and HSTS is production-only", () =
   assert.equal(production.headers.get("access-control-allow-origin"), "*");
   assert.equal(production.headers.get("access-control-allow-methods"), "GET, HEAD, OPTIONS");
   assert.equal(production.headers.get("access-control-allow-headers"), "Accept, Content-Type");
+
+  const uat = headerRecorder();
+  setBaselineSecurityHeaders(uat.response, "uat");
+  assert.equal(
+    uat.headers.get("strict-transport-security"),
+    "max-age=31536000; includeSubDomains"
+  );
 });

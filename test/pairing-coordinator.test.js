@@ -133,6 +133,7 @@ test("retry after post-registration completion failure reuses the exact device b
     },
     redeem: (...args) => realPairings.redeem(...args),
     cancel: (...args) => realPairings.cancel(...args),
+    claimValidation: (...args) => realPairings.claimValidation(...args),
   };
   const realDevices = base.storage.repositories.devices;
   const devices = {
