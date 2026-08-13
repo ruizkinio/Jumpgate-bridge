@@ -1623,7 +1623,12 @@ test("Redis composition shares one configured subtitle authority with S3", async
   );
   assert.deepEqual(
     s3Client.commands.map((command) => command.constructor.name),
-    ["HeadBucketCommand", "GetPublicAccessBlockCommand", "GetBucketPolicyStatusCommand"]
+    [
+      "HeadBucketCommand",
+      "GetBucketAclCommand",
+      "GetPublicAccessBlockCommand",
+      "GetBucketPolicyStatusCommand",
+    ]
   );
   assert.ok(
     s3Client.commands.every(
@@ -1643,9 +1648,11 @@ test("Redis composition shares one configured subtitle authority with S3", async
     s3Client.commands.map((command) => command.constructor.name),
     [
       "HeadBucketCommand",
+      "GetBucketAclCommand",
       "GetPublicAccessBlockCommand",
       "GetBucketPolicyStatusCommand",
       "HeadBucketCommand",
+      "GetBucketAclCommand",
       "GetPublicAccessBlockCommand",
       "GetBucketPolicyStatusCommand",
     ]
@@ -1676,7 +1683,12 @@ test("development Redis accepts only attested hardened store and factory injecti
   assert.equal(runtime.repositories.subtitleDeliveries._objectKeys, objectKeyFactory);
   assert.deepEqual(
     s3Client.commands.map((command) => command.constructor.name),
-    ["HeadBucketCommand", "GetPublicAccessBlockCommand", "GetBucketPolicyStatusCommand"]
+    [
+      "HeadBucketCommand",
+      "GetBucketAclCommand",
+      "GetPublicAccessBlockCommand",
+      "GetBucketPolicyStatusCommand",
+    ]
   );
   await runtime.close();
   assert.equal(s3Client.destroyCalls, 1);
@@ -1894,6 +1906,42 @@ test("subtitle S3 readiness failures are redacted and clean owned resources", as
 test("strict subtitle privacy readiness rejects missing, public, and unsupported state", async () => {
   const cases = [
     {
+      name: "public bucket ACL",
+      response(command) {
+        if (command.constructor.name === "GetBucketAclCommand") {
+          return {
+            Owner: { ID: "private-owner" },
+            Grants: [
+              {
+                Grantee: {
+                  Type: "Group",
+                  URI: "http://acs.amazonaws.com/groups/global/AllUsers",
+                },
+                Permission: "READ",
+              },
+            ],
+          };
+        }
+        return privateSubtitleS3Response(command);
+      },
+    },
+    {
+      name: "missing bucket ACL",
+      response(command) {
+        if (command.constructor.name === "GetBucketAclCommand") return {};
+        return privateSubtitleS3Response(command);
+      },
+    },
+    {
+      name: "unsupported bucket ACL",
+      response(command) {
+        if (command.constructor.name === "GetBucketAclCommand") {
+          throw new Error("NotImplemented");
+        }
+        return privateSubtitleS3Response(command);
+      },
+    },
+    {
       name: "missing public-access block",
       response(command) {
         if (command.constructor.name === "GetPublicAccessBlockCommand") return {};
@@ -1991,7 +2039,6 @@ test("Tigris privacy readiness creates and replays one durable private canary", 
     firstClient.commands.map((command) => command.constructor.name),
     [
       "HeadBucketCommand",
-      "GetBucketAclCommand",
       "GetBucketPolicyStatusCommand",
       "PutObjectCommand",
       "HeadObjectCommand",
@@ -2051,7 +2098,6 @@ test("Tigris privacy readiness creates and replays one durable private canary", 
     replayClient.commands.map((command) => command.constructor.name),
     [
       "HeadBucketCommand",
-      "GetBucketAclCommand",
       "GetBucketPolicyStatusCommand",
       "PutObjectCommand",
       "HeadObjectCommand",
@@ -2200,183 +2246,36 @@ test("Tigris canary rotation retains one object per object-key generation", asyn
   );
 });
 
-test("Tigris privacy readiness rejects bucket ACL and policy ambiguity", async () => {
+test("Tigris privacy readiness rejects policy ambiguity before writing", async () => {
   const cases = [
     {
-      name: "public bucket ACL",
-      command: "GetBucketAclCommand",
-      response: {
-        Owner: { ID: "private-owner" },
-        Grants: [
-          {
-            Grantee: {
-              Type: "Group",
-              URI: "http://acs.amazonaws.com/groups/global/AllUsers",
-            },
-            Permission: "READ",
-          },
-        ],
-      },
-    },
-    { name: "missing bucket ACL", command: "GetBucketAclCommand", response: {} },
-    {
-      name: "missing bucket owner",
-      command: "GetBucketAclCommand",
-      response: subtitleAclResponse({ ownerId: null }),
-    },
-    {
-      name: "malformed bucket owner",
-      command: "GetBucketAclCommand",
-      response: subtitleAclResponse({ ownerId: " private-owner" }),
-    },
-    {
-      name: "cross-account bucket grant",
-      command: "GetBucketAclCommand",
-      response: subtitleAclResponse({ granteeId: "different-account" }),
-    },
-    {
-      name: "bucket READ grant",
-      command: "GetBucketAclCommand",
-      response: subtitleAclResponse({ permission: "READ" }),
-    },
-    {
-      name: "bucket WRITE grant",
-      command: "GetBucketAclCommand",
-      response: subtitleAclResponse({ permission: "WRITE" }),
-    },
-    {
-      name: "unexpected bucket grantee",
-      command: "GetBucketAclCommand",
-      response: subtitleAclResponse({ type: "AmazonCustomerByEmail" }),
-    },
-    {
-      name: "unexpected Tigris group",
-      command: "GetBucketAclCommand",
-      response: subtitleAclResponse({
-        extraGrants: [
-          {
-            Grantee: { Type: "Group", URI: "https://groups.tigris.dev/org/editors" },
-            Permission: "FULL_CONTROL",
-          },
-        ],
-      }),
-    },
-    {
-      name: "Tigris admin READ grant",
-      command: "GetBucketAclCommand",
-      response: subtitleAclResponse({
-        extraGrants: [
-          {
-            Grantee: { Type: "Group", URI: TIGRIS_ORG_ADMIN_ACL_URI },
-            Permission: "READ",
-          },
-        ],
-      }),
-    },
-    {
-      name: "duplicate Tigris admin grant",
-      command: "GetBucketAclCommand",
-      response: subtitleAclResponse({
-        includeTigrisOrgAdmins: true,
-        extraGrants: [
-          {
-            Grantee: { Type: "Group", URI: TIGRIS_ORG_ADMIN_ACL_URI },
-            Permission: "FULL_CONTROL",
-          },
-        ],
-      }),
-    },
-    {
-      name: "duplicate canonical owner grant",
-      command: "GetBucketAclCommand",
-      response: subtitleAclResponse({
-        extraGrants: [
-          {
-            Grantee: { ID: "private-owner", Type: "CanonicalUser" },
-            Permission: "FULL_CONTROL",
-          },
-        ],
-      }),
-    },
-    {
-      name: "canonical owner grant with group URI",
-      command: "GetBucketAclCommand",
-      response: {
-        Owner: { ID: "private-owner" },
-        Grants: [
-          {
-            Grantee: {
-              ID: "private-owner",
-              Type: "CanonicalUser",
-              URI: TIGRIS_ORG_ADMIN_ACL_URI,
-            },
-            Permission: "FULL_CONTROL",
-          },
-        ],
-      },
-    },
-    {
-      name: "Tigris admin grant without canonical owner grant",
-      command: "GetBucketAclCommand",
-      response: {
-        Owner: { ID: "private-owner" },
-        Grants: [
-          {
-            Grantee: { Type: "Group", URI: TIGRIS_ORG_ADMIN_ACL_URI },
-            Permission: "FULL_CONTROL",
-          },
-        ],
-      },
-    },
-    {
-      name: "Tigris admin grant with canonical id",
-      command: "GetBucketAclCommand",
-      response: subtitleAclResponse({
-        extraGrants: [
-          {
-            Grantee: {
-              ID: "unexpected-id",
-              Type: "Group",
-              URI: TIGRIS_ORG_ADMIN_ACL_URI,
-            },
-            Permission: "FULL_CONTROL",
-          },
-        ],
-      }),
-    },
-    { name: "unsupported bucket ACL", command: "GetBucketAclCommand", error: true },
-    {
       name: "public bucket policy",
-      command: "GetBucketPolicyStatusCommand",
       response: { PolicyStatus: { IsPublic: true } },
     },
-    { name: "missing bucket policy", command: "GetBucketPolicyStatusCommand", response: {} },
-    {
-      name: "unsupported bucket policy",
-      command: "GetBucketPolicyStatusCommand",
-      error: true,
-    },
+    { name: "missing bucket policy", response: {} },
+    { name: "unsupported bucket policy", error: true },
   ];
 
   for (const entry of cases) {
     const client = await expectTigrisReadinessFailure((command, fallback) => {
-      if (command.constructor.name !== entry.command) return fallback();
+      if (command.constructor.name !== "GetBucketPolicyStatusCommand") {
+        return fallback();
+      }
       if (entry.error) throw new Error("provider API unavailable: " + entry.name);
       return entry.response;
     });
+    assert.equal(
+      client.commands.some((command) => command.constructor.name === "GetBucketAclCommand"),
+      false,
+      entry.name
+    );
     assert.equal(
       client.commands.some((command) => command.constructor.name === "PutObjectCommand"),
       false,
       entry.name
     );
-    assert.equal(
-      client.commands.some((command) => command.constructor.name === "DeleteObjectCommand"),
-      false,
-      entry.name
-    );
   }
 });
-
 test("Tigris privacy readiness rejects public or unverifiable canary ACLs", async () => {
   const publicGrant = (group) => ({
     Owner: { ID: "private-owner" },
@@ -2398,14 +2297,6 @@ test("Tigris privacy readiness rejects public or unverifiable canary ACLs", asyn
     {
       name: "cross-account canonical grant",
       response: subtitleAclResponse({ granteeId: "different-account" }),
-    },
-    {
-      name: "object owner differs from bucket owner",
-      response: subtitleAclResponse({
-        granteeId: "different-owner",
-        includeTigrisOrgAdmins: true,
-        ownerId: "different-owner",
-      }),
     },
     { name: "READ grant", response: subtitleAclResponse({ permission: "READ" }) },
     { name: "WRITE grant", response: subtitleAclResponse({ permission: "WRITE" }) },

@@ -176,8 +176,10 @@ The subtitle bucket must be private and operators must dedicate it to Jumpgate.
 Runtime readiness verifies privacy and integrity, but cannot prove exclusive bucket
 use. Its object-key keyring must contain one to eight canonical base64/base64url
 entries decoding to 32-64 bytes, and the current ID must name a retained entry.
-`strict` validates all public-access-block flags and a non-public policy; the
-configured Tigris mode uses policy status and a private per-generation canary.
+`strict` validates bucket ownership ACLs, all public-access-block flags, and a
+non-public policy. The configured Tigris mode uses policy status plus the exact
+version-bound object ACL and integrity of a private per-generation canary; it does
+not require Tigris's bucket ACL API, which rejects scoped runtime credentials.
 Privacy verification fails closed. Set `tigris-version-purge-v1` only after the live
 snapshot-enabled provider passes the exact-version purge attestation; keep the blocked
 value otherwise.

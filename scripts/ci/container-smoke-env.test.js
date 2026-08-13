@@ -103,7 +103,6 @@ function privacyProof(probeId, ordinal, initial) {
   };
   return [
     operationLine(probeId, ordinal, "HeadBucket"),
-    operationLine(probeId, ordinal, "GetBucketAcl"),
     operationLine(probeId, ordinal, "GetBucketPolicyStatus", { isPublic: false }),
     ...(initial
       ? [operationLine(probeId, ordinal, "PutObject", object)]

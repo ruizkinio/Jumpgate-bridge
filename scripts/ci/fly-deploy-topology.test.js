@@ -728,7 +728,9 @@ function rejectedHarnessRequest(sequenceId, operation, reason, context) {
 function privacyPrefix(sequenceId, isPublic) {
   return [
     acceptedHarnessOperation(sequenceId, "HeadBucket"),
-    acceptedHarnessOperation(sequenceId, "GetBucketAcl"),
+    ...(isPublic
+      ? [acceptedHarnessOperation(sequenceId, "GetBucketAcl")]
+      : []),
     acceptedHarnessOperation(sequenceId, "GetBucketPolicyStatus", {}, isPublic),
   ];
 }
