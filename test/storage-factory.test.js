@@ -491,6 +491,18 @@ test("release Redis preflight accepts only the adjacent read-only protocol bound
   assert.equal(assertRedisReleaseProtocolCompatibility(v5, "initialize-v5"), v5);
   assert.equal(assertRedisReleaseProtocolCompatibility(v5, "advance-v6"), v5);
   assert.equal(assertRedisReleaseProtocolCompatibility(v6, "advance-v6"), v6);
+  assert.equal(
+    assertRedisReleaseProtocolCompatibility(missing, "initialize-or-advance-v6"),
+    missing
+  );
+  assert.equal(
+    assertRedisReleaseProtocolCompatibility(v5, "initialize-or-advance-v6"),
+    v5
+  );
+  assert.equal(
+    assertRedisReleaseProtocolCompatibility(v6, "initialize-or-advance-v6"),
+    v6
+  );
 
   for (const [status, action] of [
     [v6, "initialize-v5"],

@@ -1,0 +1,58 @@
+app = 'jumpgate-uat'
+primary_region = 'iad'
+
+[build]
+
+[deploy]
+  release_command = 'node scripts/uat-release-bootstrap.js apply-env'
+
+[env]
+  NODE_ENV = 'uat'
+  JUMPGATE_UAT_MODE = '1'
+  HOST = '0.0.0.0'
+  PUBLIC_BASE_URL = 'https://jumpgate-uat.fly.dev'
+  JUMPGATE_PRIVACY_POLICY_URL = 'https://github.com/ruizkinio/Jumpgate-bridge/blob/main/PRIVACY.md'
+  JUMPGATE_SECURITY_POLICY_URL = 'https://github.com/ruizkinio/Jumpgate-bridge/blob/main/SECURITY.md'
+  JUMPGATE_SUPPORT_POLICY_URL = 'https://github.com/ruizkinio/Jumpgate-bridge/blob/main/SUPPORT.md'
+  JUMPGATE_TRUST_PROXY = '1'
+  JUMPGATE_DURABLE_DRIVER = 'postgres'
+  JUMPGATE_TTL_DRIVER = 'redis'
+  JUMPGATE_PROVIDER_MUTATION_MODE = 'fenced'
+  JUMPGATE_POSTGRES_MIGRATION_CEILING = '0011_history_http_receipts'
+  JUMPGATE_REDIS_PLAYBACK_WRITE_VERSION = '4'
+  JUMPGATE_REDIS_PLAYBACK_CLAIM_ROLLOUT_MODE = 'v6'
+  JUMPGATE_SUBTITLE_S3_BUCKET = 'jumpgate-uat-subtitles-live'
+  JUMPGATE_SUBTITLE_S3_REGION = 'auto'
+  JUMPGATE_SUBTITLE_S3_ENDPOINT = 'https://fly.storage.tigris.dev'
+  JUMPGATE_SUBTITLE_S3_FORCE_PATH_STYLE = '0'
+  JUMPGATE_SUBTITLE_S3_PRIVACY_MODE = 'tigris-policy-status'
+  JUMPGATE_SUBTITLE_PERMANENT_ERASURE_MODE = 'tigris-version-purge-v1'
+
+# UAT requires isolated values for CONFIG_SECRET, DATABASE_URL, REDIS_URL,
+# JUMPGATE_TOKEN_PEPPER, JUMPGATE_ENVELOPE_PRIMARY_KEY_ID,
+# JUMPGATE_ENVELOPE_KEYRING, JUMPGATE_SUBTITLE_S3_ACCESS_KEY_ID,
+# JUMPGATE_SUBTITLE_S3_SECRET_ACCESS_KEY,
+# JUMPGATE_SUBTITLE_OBJECT_KEY_CURRENT_ID, and
+# JUMPGATE_SUBTITLE_OBJECT_KEY_KEYRING. Never configure Trakt, TMDB, Stremio,
+# debrid, or provider credentials on this app.
+
+[http_service]
+  internal_port = 7515
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 2
+  processes = ['app']
+
+  [[http_service.checks]]
+    grace_period = '15s'
+    interval = '30s'
+    method = 'GET'
+    path = '/health/ready'
+    timeout = '5s'
+
+[[vm]]
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1
+  memory_mb = 1024

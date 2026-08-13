@@ -18,6 +18,7 @@
     "provider-protocol": "node scripts/activate-provider-mutation-protocol.js",
     "playback-claim-protocol": "node scripts/playback-claim-writer-protocol.js",
     "release-protocols": "node scripts/production-release-protocols.js apply-env",
+    "uat-release-bootstrap": "node scripts/uat-release-bootstrap.js apply-env",
     "secrets:generate": "node -e \"const {randomBytes}=require('node:crypto');const secret=()=>randomBytes(32).toString('base64url');const id='primary-'+new Date().getUTCFullYear();console.log('CONFIG_SECRET='+secret());console.log('JUMPGATE_TOKEN_PEPPER='+secret());console.log('JUMPGATE_ENVELOPE_PRIMARY_KEY_ID='+id);console.log('JUMPGATE_ENVELOPE_KEYRING='+JSON.stringify([{id,key:secret()}]));\"",
     "test": "node --test",
     "test:browser:trakt": "node scripts/ci/node-test-gate.js --no-skips --expected-tests=1 -- scripts/ci/trakt-browser-smoke.js",
