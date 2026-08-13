@@ -47,9 +47,10 @@ with the exact immutable image. Missing or v5 state selects `transition` followe
 Each selected phase's guarded release command constructs PostgreSQL first and runs the
 exact bounded `SELECT 1 AS ready` before constructing Redis or S3. It then validates
 Redis 7/8, standalone writable-primary topology, `noeviction`, the read-only
-phase-specific writer boundary, private bucket ownership, version-bound privacy, and
-the exact-version erasure canary. All owned preflight resources close on success or
-failure. Only after that gate does the command migrate PostgreSQL, activate
+phase-specific writer boundary, non-public Tigris policy status, exact-version object
+ACL privacy, and the exact-version erasure canary. Scoped runtime credentials do not
+need the provider-denied bucket ACL operation. All owned preflight resources close on
+success or failure. Only after that gate does the command migrate PostgreSQL, activate
 and attest fenced provider mutations, and apply the phase-specific Redis mutation.
 
 Transition initializes missing state to v5 and confirms v5 without changing it. The v6

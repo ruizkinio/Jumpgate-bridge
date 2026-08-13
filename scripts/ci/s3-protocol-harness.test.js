@@ -805,7 +805,6 @@ test("production readiness proves exact-version erasure through the signed harne
       .map((record) => record.operation),
     [
       "HeadBucket",
-      "GetBucketAcl",
       "GetBucketPolicyStatus",
       "PutObject",
       "HeadObject",

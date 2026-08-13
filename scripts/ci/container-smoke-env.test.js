@@ -103,7 +103,6 @@ function privacyProof(probeId, ordinal, initial) {
   };
   return [
     operationLine(probeId, ordinal, "HeadBucket"),
-    operationLine(probeId, ordinal, "GetBucketAcl"),
     operationLine(probeId, ordinal, "GetBucketPolicyStatus", { isPublic: false }),
     ...(initial
       ? [operationLine(probeId, ordinal, "PutObject", object)]
@@ -363,7 +362,6 @@ test("structured harness proofs are canonical, authenticated, probe-bound, and P
   const publicRecords = [
     line({ event: "ready", probeId, mode: "public" }),
     operationLine(probeId, 1, "HeadBucket"),
-    operationLine(probeId, 1, "GetBucketAcl"),
     operationLine(probeId, 1, "GetBucketPolicyStatus", { isPublic: true }),
   ];
   const publicLog = path.join(directory, "public.log");
@@ -392,22 +390,20 @@ test("structured harness proofs are canonical, authenticated, probe-bound, and P
   await t.test("rejects a same-probe duplicate public-policy record", () => {
     assertPublicProofRejected(
       "same-probe-duplicate-policy",
-      publicRecords.concat(publicRecords[3])
+      publicRecords.concat(publicRecords[2])
     );
   });
   await t.test("rejects reordered public attestation operations", () => {
     assertPublicProofRejected("reordered", [
       publicRecords[0],
-      publicRecords[1],
-      publicRecords[3],
       publicRecords[2],
+      publicRecords[1],
     ]);
   });
   await t.test("rejects a missing public attestation operation", () => {
     assertPublicProofRejected("missing", [
       publicRecords[0],
       publicRecords[1],
-      publicRecords[3],
     ]);
   });
   await t.test("rejects an extra accepted public operation", () => {
@@ -442,9 +438,9 @@ test("structured harness proofs are canonical, authenticated, probe-bound, and P
   const spoofLog = path.join(directory, "spoof.log");
   fs.writeFileSync(
     spoofLog,
-    publicRecords[0] +
+      publicRecords[0] +
       "\n" +
-      publicRecords[3].replace('"authenticated":true', '"authenticated":false') +
+      publicRecords[2].replace('"authenticated":true', '"authenticated":false') +
       "\n"
   );
   assert.throws(
@@ -469,7 +465,7 @@ test("structured harness proofs are canonical, authenticated, probe-bound, and P
     duplicateLog,
     publicRecords
       .slice(0, -1)
-      .concat(publicRecords[3].replace('"isPublic":true', '"isPublic":false,"isPublic":true'))
+      .concat(publicRecords[2].replace('"isPublic":true', '"isPublic":false,"isPublic":true'))
       .join("\n") + "\n"
   );
   assert.throws(

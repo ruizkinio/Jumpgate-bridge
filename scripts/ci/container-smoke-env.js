@@ -24,12 +24,10 @@ const HARNESS_OPERATIONS = Object.freeze([
 ]);
 const PUBLIC_ATTESTATION_SEQUENCE = Object.freeze([
   { operation: "HeadBucket", versionSelector: "none" },
-  { operation: "GetBucketAcl", versionSelector: "none" },
   { operation: "GetBucketPolicyStatus", isPublic: true, versionSelector: "none" },
 ]);
 const PRIVATE_PRIVACY_PREFIX = Object.freeze([
   { operation: "HeadBucket", versionSelector: "none" },
-  { operation: "GetBucketAcl", versionSelector: "none" },
   { operation: "GetBucketPolicyStatus", isPublic: false, versionSelector: "none" },
 ]);
 const PRIVATE_INITIAL_PRIVACY_TAIL = Object.freeze([

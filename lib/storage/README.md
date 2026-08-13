@@ -130,11 +130,13 @@ deletion, backup deletion, or physical media sanitization.
 Operators must enable snapshots before attestation so Tigris returns provider version
 IDs; an unversioned bucket fails the exact-delete proof and must remain blocked.
 
-Tigris represents a private bucket's organization administrators with the exact
-`https://groups.tigris.dev/org/admins` ACL group. The Tigris readiness path accepts
-only that provider-native group with `FULL_CONTROL`, alongside the required canonical
-owner grant. Public, authenticated-user, unknown-group, duplicate, and malformed grants
-still fail closed for both the bucket and its private canary.
+Tigris represents a private object's organization administrators with the exact
+`https://groups.tigris.dev/org/admins` ACL group. Scoped Tigris runtime credentials
+cannot call the bucket ACL API, so Tigris readiness instead binds this ACL proof to the
+exact canary version it just wrote. It accepts only that provider-native group with
+`FULL_CONTROL`, alongside the required canonical owner grant. Public,
+authenticated-user, unknown-group, duplicate, and malformed object grants still fail
+closed. Non-Tigris `strict` mode retains its separate bucket ACL validation.
 
 Object writes still request `AES256` server-side encryption and carry a fresh
 SigV4-signed 256-bit attempt nonce. Tigris does not echo the AWS-specific SSE response
@@ -162,9 +164,11 @@ exposes `ready()` (also `healthCheck()`), `state`, and idempotent `close()`.
 
 The separate production release preflight follows the same PostgreSQL-first probe,
 then constructs the S3 client, constructs and validates Redis, and validates private,
-versioned S3 before any durable migration or writer-protocol mutation. Preflight
-always closes its owned resources; runtime startup failure closes every owned resource
-opened earlier in the sequence.
+versioned S3 before any durable migration or writer-protocol mutation. Tigris privacy
+uses non-public policy status plus the exact written canary version's object ACL; it
+does not depend on the bucket ACL operation denied to scoped runtime credentials.
+Preflight always closes its owned resources; runtime startup failure closes every
+owned resource opened earlier in the sequence.
 
 The runtime owns clients it creates and closes them in reverse startup order. An
 injected PostgreSQL pool/database or already-open Redis client remains caller-owned

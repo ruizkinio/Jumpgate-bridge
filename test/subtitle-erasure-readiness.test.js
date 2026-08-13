@@ -5,6 +5,7 @@ const crypto = require("node:crypto");
 const { test } = require("node:test");
 const {
   DeleteObjectCommand,
+  GetBucketAclCommand,
   GetBucketPolicyStatusCommand,
   GetPublicAccessBlockCommand,
   HeadBucketCommand,
@@ -90,6 +91,17 @@ class AttestedTigrisClient {
     this.commands.push(command);
     if (command instanceof HeadBucketCommand) {
       return { $metadata: { httpHeaders: {} } };
+    }
+    if (command instanceof GetBucketAclCommand) {
+      return {
+        Owner: { ID: "private-owner" },
+        Grants: [
+          {
+            Grantee: { ID: "private-owner", Type: "CanonicalUser" },
+            Permission: "FULL_CONTROL",
+          },
+        ],
+      };
     }
     if (command instanceof GetPublicAccessBlockCommand) {
       return {
@@ -217,8 +229,9 @@ test("production readiness needs no undocumented snapshot response header", asyn
 
   assert.equal(fixture.client.objects.size, 0);
   const names = fixture.client.commands.map((command) => command.constructor.name);
-  assert.deepEqual(names.slice(0, 3), [
+  assert.deepEqual(names.slice(0, 4), [
     "HeadBucketCommand",
+    "GetBucketAclCommand",
     "GetPublicAccessBlockCommand",
     "GetBucketPolicyStatusCommand",
   ]);
