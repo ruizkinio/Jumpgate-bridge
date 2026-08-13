@@ -1,3 +1,5 @@
 LICENSE text eol=lf
 *.sql text eol=lf
-test/fixtures/source-fingerprint-v1.json text eol=lf
+*.lua text eol=lf
+.github/workflows/*.yml text eol=lf
+test/fixtures/*.json text eol=lf

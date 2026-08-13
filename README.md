@@ -350,10 +350,10 @@ sequence-bound privacy replays. That isolated proof does not
 replace live Tigris attestation.
 
 The project requires Node 24 LTS. npm dependency install scripts are denied unless
-explicitly approved in `package.json`; only the pinned `better-sqlite3` build is
-allowed. Package publish lifecycle scripts are forbidden so policy inspection and a
-real script-disabled `npm pack` produce the same artifact. The package is private and
-its pack allowlist contains runtime files only.
+explicitly approved in `package.json`; the pinned `better-sqlite3` release ships its
+platform prebuilds without an install hook. Package publish lifecycle scripts are
+forbidden so policy inspection and a real script-disabled `npm pack` produce the same
+artifact. The package is private and its pack allowlist contains runtime files only.
 
 ## License
 
