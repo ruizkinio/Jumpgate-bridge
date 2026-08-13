@@ -56,6 +56,11 @@ redis.call("HSET", KEYS[1],
   "state", "pending",
   "createdAt", tostring(now),
   "expiresAt", tostring(expiresAt))
+if ARGV[10] ~= "" then
+  redis.call("HSET", KEYS[1],
+    "validationScenario", ARGV[10],
+    "validationRateLimitClaimed", "0")
+end
 redis.call("SET", KEYS[2], ARGV[1])
 redis.call("SET", KEYS[3], ARGV[1])
 redis.call("PEXPIREAT", KEYS[2], physicalExpiry)

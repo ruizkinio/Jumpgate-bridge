@@ -44,6 +44,11 @@ const {
   setPublicAddonCors,
 } = require("./lib/http-boundary");
 const { createRateLimitMiddleware } = require("./lib/rate-limit-middleware");
+const {
+  assertValidationScenario,
+  loadReleaseValidationConfig,
+  waitForRequest,
+} = require("./lib/release-validation");
 const { HistoryService, projectCanonicalIdentity } = require("./lib/history-service");
 const { assertCanonicalUuid } = require("./lib/history-protocol");
 const {
@@ -63,9 +68,12 @@ const {
   createStorageRuntime,
   loadStorageConfig,
 } = require("./lib/storage");
+const { isProductionLikeEnvironment } = require("./lib/runtime-environment");
+
+const RELEASE_VALIDATION = loadReleaseValidationConfig(process.env);
 
 if (!process.env.CONFIG_SECRET) {
-  if (process.env.NODE_ENV === "production") {
+  if (process.env.NODE_ENV === "production" || RELEASE_VALIDATION.enabled) {
     console.error("FATAL: CONFIG_SECRET environment variable is required in production");
     process.exit(1);
   }
@@ -1831,6 +1839,10 @@ async function getConfiguredTraktToken(profileId, config) {
 }
 const CONFIGURE_TEMPLATE_PATH = path.join(__dirname, "public", "configure.html");
 const CONFIGURE_TEMPLATE = fs.readFileSync(CONFIGURE_TEMPLATE_PATH, "utf8");
+const RELEASE_VALIDATION_TEMPLATE = fs.readFileSync(
+  path.join(__dirname, "public", "release-validation.html"),
+  "utf8"
+);
 const CONFIGURE_TEMPLATE_TOKEN = /@@JUMPGATE_[A-Z_]+@@/g;
 
 function renderConfigurePage(req, res, opts) {
@@ -1869,6 +1881,58 @@ function renderConfigurePage(req, res, opts) {
     return replacements[token];
   });
 
+  setConfigurePrivacyHeaders(res, scriptNonce);
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.end(html);
+}
+
+function isSyntheticReleaseValidationConfig(config) {
+  const trakt = normalizeTraktTokens(config && config.trakt);
+  return Boolean(
+    config &&
+      config.v === 2 &&
+      /^[A-Za-z0-9_-]{16,64}$/.test(config.profileId || "") &&
+      config.profileScope === "" &&
+      config.name === "Release Validation" &&
+      config.tmdbKey === "" &&
+      config.upstream === "" &&
+      trakt.access_token === "" &&
+      trakt.refresh_token === "" &&
+      trakt.token_expiry === 0 &&
+      config.settings &&
+      config.settings.subtitle_languages === "en" &&
+      config.settings.subtitles_enabled === false &&
+      config.settings.trakt_enabled === false &&
+      config.settings.bridge_url === ""
+  );
+}
+
+function renderReleaseValidationPage(req, res, pairCode) {
+  const scriptNonce = crypto.randomBytes(18).toString("base64url");
+  const profileIdentity = resolveProfileIdentity("");
+  const config = encryptConfig(
+    normalizeConfig({
+      v: 2,
+      ...profileIdentity,
+      name: "Release Validation",
+      tmdbKey: "",
+      trakt: {},
+      settings: {
+        subtitle_languages: "en",
+        subtitles_enabled: false,
+        trakt_enabled: false,
+        bridge_url: "",
+      },
+    })
+  );
+  const replacements = {
+    "@@JUMPGATE_ASSET_REVISION@@": CONFIGURE_ASSET_REVISION,
+    "@@JUMPGATE_SCRIPT_NONCE@@": scriptNonce,
+    "@@JUMPGATE_UAT_PAIR_CODE@@": escapeHtml(pairCode || ""),
+    "@@JUMPGATE_UAT_BOOTSTRAP_JSON@@": safeJsonForScript({ config }),
+  };
+  let html = RELEASE_VALIDATION_TEMPLATE;
+  for (const [token, value] of Object.entries(replacements)) html = html.split(token).join(value);
   setConfigurePrivacyHeaders(res, scriptNonce);
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.end(html);
@@ -1951,7 +2015,7 @@ const app = express();
 app.disable("x-powered-by");
 app.set("trust proxy", resolveTrustProxy(process.env));
 app.use((req, res, next) => {
-  setBaselineSecurityHeaders(res, process.env.NODE_ENV === "production");
+  setBaselineSecurityHeaders(res, process.env.NODE_ENV);
   if (isPublicAddonPath(req.path)) {
     setPublicAddonCors(res);
     if (req.method === "OPTIONS") return res.sendStatus(204);
@@ -2191,6 +2255,26 @@ app.use((req, _res, next) => {
   next();
 });
 
+if (RELEASE_VALIDATION.enabled) {
+  app.use((req, res, next) => {
+    const exact = new Map([
+      ["GET /", true],
+      ["GET /configure", true],
+      ["GET /favicon.ico", true],
+      ["GET /version", true],
+      ["POST /pair/device/code", true],
+      ["POST /pair/device/token", true],
+      ["POST /pair/activate", true],
+    ]);
+    const key = req.method + " " + req.path;
+    if (exact.has(key) || (req.method === "GET" && /^\/(?:assets|p)\//.test(req.path))) {
+      return next();
+    }
+    res.setHeader("Cache-Control", "no-store");
+    return res.status(404).json({ ok: false, error: "not_found" });
+  });
+}
+
 async function requireDeviceAuth(req, res, next) {
   const token = getBearerToken(req);
   const device = token ? await pairingCoordinator.authenticate(token) : null;
@@ -2403,7 +2487,7 @@ app.post(
 );
 
 function secureCookieForRequest(req) {
-  if (process.env.NODE_ENV === "production") return true;
+  if (isProductionLikeEnvironment(process.env.NODE_ENV)) return true;
   try {
     return new URL(getPublicBaseUrl(req)).protocol === "https:";
   } catch (_error) {
@@ -3006,6 +3090,7 @@ const CONFIGURE_ASSETS = new Map(
   [
     ["configure.css", { contentType: "text/css; charset=utf-8", maxAge: 300 }],
     ["configure.js", { contentType: "application/javascript; charset=utf-8", maxAge: 300 }],
+    ["release-validation.js", { contentType: "application/javascript; charset=utf-8", maxAge: 300 }],
     ["stremio-account-client.js", { contentType: "application/javascript; charset=utf-8", maxAge: 300 }],
     ["jumpgate-mark.svg", { contentType: "image/svg+xml; charset=utf-8", maxAge: 86400, publicMedia: true }],
     ["jumpgate-mark.png", { contentType: "image/png", maxAge: 86400, publicMedia: true }],
@@ -3058,6 +3143,9 @@ app.get("/configure", (req, res) => {
       : typeof req.query.pair === "string"
       ? req.query.pair
       : "";
+  if (RELEASE_VALIDATION.enabled) {
+    return renderReleaseValidationPage(req, res, formatPairUserCode(queryPairCode));
+  }
   const queryPairExpiresAt =
     typeof req.query.pairExpiresAt === "string"
       ? req.query.pairExpiresAt
@@ -3118,6 +3206,7 @@ app.get("/configure", (req, res) => {
 });
 
 app.post("/configure/generate", express.json({ limit: "8kb" }), (req, res) => {
+  if (RELEASE_VALIDATION.enabled) return res.status(404).json({ ok: false, error: "not_found" });
   try {
     const name = String(req.body && req.body.name ? req.body.name : "").trim().slice(0, 64);
     const tmdbKey = normalizeTmdbKeyInput(req.body && req.body.tmdbKey ? req.body.tmdbKey : "");
@@ -3211,11 +3300,28 @@ app.post(
   express.json({ limit: "1kb" }),
   asyncHandler(async (req, res) => {
     try {
+      const validationScenario = assertValidationScenario(
+        req.body && req.body.validationScenario,
+        RELEASE_VALIDATION
+      );
       const deviceName =
         req.body && typeof req.body.deviceName === "string"
           ? req.body.deviceName.trim().slice(0, 128)
           : "Jumpgate";
-      const issued = await pairingCoordinator.issue({ deviceName });
+      if (
+        validationScenario === "delayed-issue" &&
+        !(await waitForRequest(req, res, RELEASE_VALIDATION.delayedIssueMs))
+      ) {
+        return;
+      }
+      const issued = await pairingCoordinator.issue({
+        deviceName,
+        validationScenario: validationScenario || undefined,
+        ttlMs:
+          validationScenario === "short-expiry"
+            ? RELEASE_VALIDATION.shortExpiryMs
+            : undefined,
+      });
       const formattedUserCode = formatPairUserCode(issued.userCode);
       const verificationUrl = getPublicBaseUrl(req) + "/configure";
       const verificationUrlWithCode = buildPairPrefillUrl(req, formattedUserCode, issued.expiresAt);
@@ -3286,6 +3392,15 @@ app.post(
     if (!configBlob) return res.status(400).json({ ok: false, error: "Missing config" });
 
     try {
+      if (RELEASE_VALIDATION.enabled) {
+        let candidateConfig = null;
+        try {
+          candidateConfig = decryptConfig(configBlob);
+        } catch (_error) {}
+        if (!isSyntheticReleaseValidationConfig(candidateConfig)) {
+          return res.status(400).json({ ok: false, error: "synthetic_config_required" });
+        }
+      }
       const urls = buildConfiguredUrls(req, configBlob);
       const activated = await pairingCoordinator.activate({
         userCode,
@@ -3359,6 +3474,26 @@ app.post(
 
     res.setHeader("Cache-Control", "no-store");
     try {
+      const validation = RELEASE_VALIDATION.enabled
+        ? await pairingCoordinator.claimValidation(deviceCode)
+        : null;
+      if (validation && validation.rateLimitNow) {
+        res.setHeader("Retry-After", String(RELEASE_VALIDATION.retryAfterSec));
+        return res.status(429).json({ ok: false, error: "Pairing temporarily rate-limited" });
+      }
+      if (validation && validation.scenario === "terminal-failure") {
+        return res.status(422).json({ ok: false, error: "Injected pairing terminal failure" });
+      }
+      if (
+        validation &&
+        (validation.scenario === "delayed-poll" || validation.scenario === "short-expiry")
+      ) {
+        const delayMs =
+          validation.scenario === "short-expiry"
+            ? RELEASE_VALIDATION.shortExpiryMs
+            : RELEASE_VALIDATION.delayedPollMs;
+        if (!(await waitForRequest(req, res, delayMs))) return;
+      }
       let disclosed = false;
       const result = await pairingCoordinator.redeem(deviceCode, (redeemed) => {
         disclosed = true;
@@ -4445,7 +4580,7 @@ app.post("/:config/resume", (_req, res) => sendLegacyLifecycleGone(res));
 app.get("/:config/configure", asyncHandler(configAliasMiddleware), asyncHandler(configuredConfigureHandler));
 app.get("/:config/version", asyncHandler(configAliasMiddleware), (_req, res) => sendVersion(res));
 
-if (process.env.NODE_ENV !== "production") {
+if (process.env.NODE_ENV === "development" || process.env.NODE_ENV === "test") {
   app.post("/test-encrypt", express.json({ limit: "16kb" }), (req, res) => {
     try {
       const blob = encryptConfig(req.body);
@@ -4508,7 +4643,7 @@ app.closeStorage = async () => {
 
 function resolveListenHost(environment, env) {
   if (!Object.prototype.hasOwnProperty.call(env, "HOST")) {
-    return environment === "production" ? "0.0.0.0" : "127.0.0.1";
+    return isProductionLikeEnvironment(environment) ? "0.0.0.0" : "127.0.0.1";
   }
   const raw = typeof env.HOST === "string" ? env.HOST : "";
   const host = raw.trim();

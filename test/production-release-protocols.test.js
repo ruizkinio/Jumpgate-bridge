@@ -164,6 +164,7 @@ test("release configuration is production-only and resolves the guarded Redis ph
 test("release configuration rejects non-production and weakened protocol state", () => {
   const cases = [
     { NODE_ENV: "development" },
+    { NODE_ENV: "uat" },
     { JUMPGATE_DURABLE_DRIVER: "sqlite" },
     { JUMPGATE_TTL_DRIVER: "memory" },
     { JUMPGATE_PROVIDER_MUTATION_MODE: "legacy" },

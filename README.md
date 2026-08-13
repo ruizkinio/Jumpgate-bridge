@@ -36,6 +36,15 @@ hang when the same cached stream is selected after returning from an external pl
 Future Stremio releases require the external-player lifecycle gate in the coordinated
 Jumpgate device UAT before they become a release baseline.
 
+### Maintainer Release Validation
+
+Fault scenarios run only on the isolated `https://jumpgate-uat.fly.dev` deployment.
+That deployment uses `NODE_ENV=uat` with `JUMPGATE_UAT_MODE=1`, production-equivalent
+HTTPS and storage hardening, and separate PostgreSQL, Redis, subtitle storage, and
+security material. It refuses Trakt, TMDB, and provider credentials and exposes only
+health, synthetic pairing, version, and static configuration-page routes. Production
+refuses UAT mode, and production release-protocol commands remain production-only.
+
 ## Pre-release Hosted Instance
 
 Open:

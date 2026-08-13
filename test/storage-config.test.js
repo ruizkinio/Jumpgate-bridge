@@ -71,6 +71,29 @@ test("production storage defaults to PostgreSQL and Redis with purpose-specific 
   assert.equal(config.legacyConfigSecret, null);
 });
 
+test("UAT inherits production storage topology, protocol, and key requirements", () => {
+  const config = loadStorageConfig(secureEnvironment({ NODE_ENV: "uat" }));
+  assert.equal(config.environment, "uat");
+  assert.equal(config.durableDriver, "postgres");
+  assert.equal(config.ttlDriver, "redis");
+  assert.equal(config.providerMutationMode, "fenced");
+  assert.equal(config.redisPlaybackWriteVersion, "4");
+  assert.equal(config.ephemeralSecurityMaterial, false);
+
+  assert.throws(
+    () => loadStorageConfig(secureEnvironment({ NODE_ENV: "uat", JUMPGATE_TTL_DRIVER: "memory" })),
+    /requires PostgreSQL durable storage and Redis TTL storage/
+  );
+  assert.throws(
+    () => loadStorageConfig(secureEnvironment({ NODE_ENV: "uat", JUMPGATE_PROVIDER_MUTATION_MODE: "legacy" })),
+    /requires fenced provider mutation/
+  );
+  assert.throws(
+    () => loadStorageConfig(secureEnvironment({ NODE_ENV: "uat", JUMPGATE_REDIS_PLAYBACK_WRITE_VERSION: "3" })),
+    /requires Redis playback write version 4/
+  );
+});
+
 test("production accepts only the documented Tigris exact-version purge mode", () => {
   const config = loadStorageConfig(
     secureEnvironment({

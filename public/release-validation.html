@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#11171d">
+  <title>Jumpgate Release Validation</title>
+  <link rel="stylesheet" href="/assets/configure.css?v=@@JUMPGATE_ASSET_REVISION@@">
+</head>
+<body>
+  <div class="scene" aria-hidden="true"><div class="scene-gate"></div><div class="scene-noise"></div></div>
+  <main class="shell">
+    <header class="identity-blade">
+      <div class="identity-lockup">
+        <img class="brand-mark" src="/assets/jumpgate-mark.svg" alt="">
+        <div class="identity-copy"><span class="brand-kicker">Maintainer tool</span><span class="brand-name">Jumpgate</span><span class="brand-subtitle">Release validation</span></div>
+      </div>
+      <div class="route-readout"><span>UAT Bridge</span><span class="route-vector" aria-hidden="true">&rarr;</span><span>Kodi</span></div>
+    </header>
+    <div class="workspace">
+      <header class="hero title-plate">
+        <p class="eyebrow">Controlled pairing harness</p>
+        <h1><span class="hero-lead">Validate the release</span><span class="hero-word">JUMPGATE</span></h1>
+        <p class="hero-copy">This isolated service creates a synthetic profile only. Do not enter Stremio, provider, Trakt, TMDB, or personal credentials.</p>
+      </header>
+      <section class="setup-panel" aria-labelledby="validationHeading">
+        <div class="section-heading"><div><p class="section-kicker">Physical UAT</p><h2 id="validationHeading">Activate pairing scenario</h2></div><span class="section-state">Synthetic only</span></div>
+        <div class="notice-row caution" role="note"><span class="notice-icon" aria-hidden="true">!</span><p>The scenario is bound by the Bridge to the one-time device code. This page cannot choose or change it.</p></div>
+        <div class="pair-entry">
+          <div class="field-group"><label for="pairCode">Pair code</label><input id="pairCode" maxlength="9" autocomplete="one-time-code" inputmode="text" placeholder="ABCD-EFGH" value="@@JUMPGATE_UAT_PAIR_CODE@@"></div>
+          <button id="activateBtn" class="a" type="button">Activate synthetic profile</button>
+        </div>
+        <div id="status" class="status-line" role="status" aria-live="polite" aria-atomic="true"></div>
+      </section>
+    </div>
+  </main>
+  <script id="jumpgate-uat-bootstrap" type="application/json" nonce="@@JUMPGATE_SCRIPT_NONCE@@">@@JUMPGATE_UAT_BOOTSTRAP_JSON@@</script>
+  <script src="/assets/release-validation.js?v=@@JUMPGATE_ASSET_REVISION@@" nonce="@@JUMPGATE_SCRIPT_NONCE@@" defer></script>
+</body>
+</html>

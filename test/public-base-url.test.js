@@ -38,6 +38,15 @@ test("production requires one canonical HTTPS public origin", () => {
     PUBLIC_BASE_URL: "https://bridge.example:8443/",
   });
   assert.equal(resolve(request("http", "attacker.example", "attacker.example")), "https://bridge.example:8443");
+
+  assert.throws(
+    () => createPublicBaseUrlResolver({ NODE_ENV: "uat" }),
+    /PUBLIC_BASE_URL is required/
+  );
+  assert.throws(
+    () => createPublicBaseUrlResolver({ NODE_ENV: "uat", PUBLIC_BASE_URL: "http://uat.example" }),
+    /must use HTTPS/
+  );
 });
 
 test("public origins reject embedded capabilities and ambiguous URL material", () => {

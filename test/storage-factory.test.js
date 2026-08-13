@@ -793,6 +793,18 @@ test("production readiness exposes the precise Tigris permanent-erasure blocker"
   );
 });
 
+test("UAT enforces production subtitle erasure and composition hardening", async () => {
+  const config = productionConfig({ NODE_ENV: "uat" });
+  assert.throws(
+    () => assertProductionSubtitleErasureReadiness(config),
+    (error) => error.code === "subtitle_permanent_erasure_unverifiable"
+  );
+  await assert.rejects(
+    createStorageRuntime(config, { subtitleS3Client: new FakeSubtitleS3Client() }),
+    /production subtitle storage does not allow injected clients/
+  );
+});
+
 test("production preflight probes and closes PostgreSQL before constructing Redis or S3", async () => {
   const events = [];
   let pool;
@@ -2933,6 +2945,34 @@ test("production Redis startup fails closed on unverified server versions", asyn
     assert.equal(redisClient.listenerCount("error"), 0);
     assert.equal(pool.listenerCount("error"), 0);
   }
+});
+
+test("UAT Redis startup verifies the server version and no-eviction policy", async () => {
+  const unsupportedPool = new FakePool();
+  const unsupportedRedis = new FakeRedisClient({
+    serverInfo: "# Server\r\nredis_version:6.2.19\r\n",
+  });
+  await assert.rejects(
+    createStorageRuntimeImpl(productionConfig({ NODE_ENV: "uat" }), {
+      attestProviderMutationMode: async () => {},
+      createPostgresPool: () => unsupportedPool,
+      createRedisClient: () => unsupportedRedis,
+      runPostgresMigrations: async () => ({ applied: [], alreadyApplied: [], verified: [] }),
+    }),
+    (error) => error.code === "redis_version_unsupported"
+  );
+
+  const evictionPool = new FakePool();
+  const evictionRedis = new FakeRedisClient({ maxmemoryPolicy: "allkeys-lru" });
+  await assert.rejects(
+    createStorageRuntimeImpl(productionConfig({ NODE_ENV: "uat" }), {
+      attestProviderMutationMode: async () => {},
+      createPostgresPool: () => evictionPool,
+      createRedisClient: () => evictionRedis,
+      runPostgresMigrations: async () => ({ applied: [], alreadyApplied: [], verified: [] }),
+    }),
+    (error) => error.code === "redis_eviction_policy"
+  );
 });
 
 test("Redis readiness rejects replicas and read-only primaries with startup cleanup", async () => {
