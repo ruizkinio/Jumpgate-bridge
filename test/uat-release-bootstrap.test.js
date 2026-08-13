@@ -17,6 +17,7 @@ function uatEnvironment(overrides = {}) {
   return {
     NODE_ENV: "uat",
     JUMPGATE_UAT_MODE: "1",
+    JUMPGATE_UAT_VOBSUB_FIXTURE: "1",
     PUBLIC_BASE_URL: "https://jumpgate-uat.fly.dev",
     JUMPGATE_DURABLE_DRIVER: "postgres",
     JUMPGATE_TTL_DRIVER: "redis",
@@ -158,6 +159,9 @@ test("UAT bootstrap requires the exact isolated runtime identity", () => {
   const cases = [
     { NODE_ENV: "production" },
     { JUMPGATE_UAT_MODE: "0" },
+    { JUMPGATE_UAT_VOBSUB_FIXTURE: undefined },
+    { JUMPGATE_UAT_VOBSUB_FIXTURE: "0" },
+    { JUMPGATE_UAT_VOBSUB_FIXTURE: "true" },
     { PUBLIC_BASE_URL: "https://jumpgate-bridge.fly.dev" },
     { JUMPGATE_DURABLE_DRIVER: "sqlite" },
     { JUMPGATE_TTL_DRIVER: "memory" },
@@ -319,12 +323,15 @@ test("UAT bootstrap error reporting never prints exception details", () => {
 test("pinned Fly UAT deployment uses only the guarded bootstrap and isolated identity", () => {
   const root = path.join(__dirname, "..");
   const fly = parseToml(fs.readFileSync(path.join(root, "fly.uat.toml"), "utf8"));
-  const dockerfile = fs.readFileSync(path.join(root, "Dockerfile"), "utf8");
+  const dockerfile = fs.readFileSync(path.join(root, "Dockerfile.uat"), "utf8");
+  const productionDockerfile = fs.readFileSync(path.join(root, "Dockerfile"), "utf8");
 
   assert.equal(fly.app, "jumpgate-uat");
   assert.equal(fly.deploy.release_command, "node scripts/uat-release-bootstrap.js apply-env");
   assert.equal(fly.env.NODE_ENV, "uat");
   assert.equal(fly.env.JUMPGATE_UAT_MODE, "1");
+  assert.equal(fly.env.JUMPGATE_UAT_VOBSUB_FIXTURE, "1");
+  assert.equal(fly.build.dockerfile, "Dockerfile.uat");
   assert.equal(fly.env.PUBLIC_BASE_URL, "https://jumpgate-uat.fly.dev");
   assert.equal(fly.env.JUMPGATE_DURABLE_DRIVER, "postgres");
   assert.equal(fly.env.JUMPGATE_TTL_DRIVER, "redis");
@@ -343,4 +350,10 @@ test("pinned Fly UAT deployment uses only the guarded bootstrap and isolated ide
     /ln -s \.\.\/lib\/storage\/uat-release-bootstrap\.js[\s\S]*\/app\/scripts\/uat-release-bootstrap\.js/
   );
   assert.doesNotMatch(dockerfile, /COPY[^\n]*scripts/);
+  assert.match(dockerfile, /COPY --chown=node:node uat-fixtures \.\/uat-fixtures/);
+  assert.doesNotMatch(productionDockerfile, /uat-fixtures/);
+  assert.equal(
+    dockerfile.replace("COPY --chown=node:node uat-fixtures ./uat-fixtures\n", "").replace(/\r\n/g, "\n"),
+    productionDockerfile.replace(/\r\n/g, "\n")
+  );
 });

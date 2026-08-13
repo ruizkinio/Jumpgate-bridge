@@ -41,9 +41,12 @@ Jumpgate device UAT before they become a release baseline.
 Fault scenarios run only on the isolated `https://jumpgate-uat.fly.dev` deployment.
 That deployment uses `NODE_ENV=uat` with `JUMPGATE_UAT_MODE=1`, production-equivalent
 HTTPS and storage hardening, and separate PostgreSQL, Redis, subtitle storage, and
-security material. It refuses Trakt, TMDB, and provider credentials and exposes only
-health, synthetic pairing, version, and static configuration-page routes. Production
-refuses UAT mode, and production release-protocol commands remain production-only.
+security material. It refuses Trakt, TMDB, and provider credentials. With
+`JUMPGATE_UAT_VOBSUB_FIXTURE=1`, successful synthetic pairing seeds one fixed provider
+and exposes original silent media plus a three-cue bitmap subtitle archive through
+the normal configured provider, claim, staging, and authenticated delivery path.
+Production rejects both UAT mode and the fixture flag, and production
+release-protocol commands remain production-only.
 
 The reviewed UAT deployment is pinned in `fly.uat.toml`. Its release command is a
 separate UAT-only bootstrap that requires the exact UAT mode and origin, applies the
@@ -52,6 +55,12 @@ then advances the Redis playback-writer protocol to v6. It is idempotent after t
 state is reached and refuses production. The UAT app must use isolated PostgreSQL,
 Redis, subtitle storage, and generated security material; never attach production
 resources or configure Trakt, TMDB, Stremio, debrid, or provider credentials.
+
+After deploying an exact reviewed commit, maintainers run
+`npm run uat-vobsub-live-smoke -- --expected-sha=<40-hex-commit>`. The smoke is fixed
+to `https://jumpgate-uat.fly.dev`, prints no pairing or device capabilities, and
+proves the deployed Bridge can fetch its fixture through the real HTTPS provider and
+subtitle policies before physical-device UAT begins.
 
 ## Pre-release Hosted Instance
 

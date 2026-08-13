@@ -10,6 +10,8 @@
 !migrations/**
 !public/
 !public/**
+!uat-fixtures/
+!uat-fixtures/**
 
 # Secrets and local configuration stay outside every local or remote build context.
 .env

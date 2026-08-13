@@ -684,7 +684,7 @@ test("GET /configure renders the canonical safe template under a per-response no
     first.body
   );
   assert.ok(stylesheetRevision);
-  assert.equal(stylesheetRevision[1], `${require("../package.json").version}-r14`);
+  assert.equal(stylesheetRevision[1], `${require("../package.json").version}-r15`);
   const versionedScripts = [
     ...first.body.matchAll(
       /<script\b[^>]*src="\/assets\/(?:stremio-account-client|configure)\.js\?v=([A-Za-z0-9._-]+)"[^>]*><\/script>/g
