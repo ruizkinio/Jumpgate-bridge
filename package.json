@@ -45,6 +45,6 @@
   "devDependencies": {
     "markdown-it": "14.3.0",
     "playwright": "1.62.0",
-    "smol-toml": "1.7.0"
+    "smol-toml": "1.7.1"
   }
 }
